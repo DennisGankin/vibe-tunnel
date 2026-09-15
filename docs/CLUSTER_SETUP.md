@@ -75,7 +75,33 @@ Each remaining assumption has a fallback; fix the script if reality differs.
 | Apptainer creates bind destinations that do not exist in the image (the workspace is mounted at its `/cluster/...` path; needs the default underlay/overlay support) | `bin/vibe-tunnel-lib` | fall back to `/workspace` only: drop the same-path bind |
 | `--nv` on a non-GPU node only warns | `bin/vibe-tunnel-lib` | drop `--nv` for CPU profiles via an env toggle (euler-vibe passes it unconditionally too) |
 
-## 5. Operational notes
+## 5. Shared installation for a group (maintainer)
+
+One person installs once; everyone else runs the installation's `setup.sh` and gets only their private state.
+
+```bash
+cd /cluster/project/<group>/software
+git clone <this repo> vibe-tunnel && cd vibe-tunnel
+module load eth_proxy && ./setup.sh          # builds images/vibe-tunnel.sif, downloads cli/code, your own env + PATH
+cp site.env.example site.env && $EDITOR site.env   # maintainer name, image path if elsewhere, default home policy
+chmod -R a+rX .                              # group can read/execute; nobody but you can write
+```
+Updating: `git pull` in that directory (and `./setup.sh --force` when the image recipe or the CLI should be
+refreshed). Running jobs are unaffected; the next launch uses the new scripts.
+
+What users get when they run `/cluster/project/<group>/software/vibe-tunnel/setup.sh`:
+- the check that image and CLI exist (nothing is built or downloaded, the directory is not writable for them)
+- `~/.vibe-tunnel/env` (their overrides) and `~/.vibe-tunnel` created mode 700
+- the PATH line in their `~/.bashrc`
+
+Per-user state (never in the shared directory): `~/.vibe-tunnel/{configs,profiles,logs,jobs,home,env,last-job}`.
+`vibe-tunnel profiles edit NAME` copies a shared preset to the user's `profiles/` before editing, so presets stay
+as installed. `vibe-tunnel doctor` reports "shared installation" and the maintainer from `site.env`.
+
+Slurm accounts: the presets carry the group's accounts; a user on a different account changes it once under
+*Resources* and saves the config, or creates an own profile.
+
+## 6. Operational notes
 
 - **Logs**: `~/.vibe-tunnel/logs/<jobid>.log` is the slurm output and the only log; `vibe-tunnel wait` parses it. `vibe-tunnel show <jobid>` prints state + log in one go.
 - **Concurrency**: one job per label. Each job has its own `--cli-data-dir` (`/home/.vscode-cli/jobs/<jobid>`), which avoids the singleton-lock retries seen in the old `tunnel_output_*.log` files when a data dir was reused across nodes. Dirs older than 7 days are pruned at job start.
@@ -85,7 +111,7 @@ Each remaining assumption has a fallback; fix the script if reality differs.
 - **Terminal use without VS Code**: `vibe-tunnel claude|shell [--config N | --workspace D ...]` runs the same container interactively on the current node; use it inside an interactive slurm job.
 - **Cleaning up**: `rm -rf ~/.vibe-tunnel/jobs/*` (settings of past submissions) and old logs are safe to delete any time. Configs in `~/.vibe-tunnel/configs` and the sandbox home in `~/.vibe-tunnel/home` are the state you want to keep.
 
-## 6. Extensions and settings live in the sandbox home
+## 7. Extensions and settings live in the sandbox home
 
 With `codeserver_tunnel` the VS Code server ran on the node with your cluster `$HOME`, so extensions were in
 `/cluster/home/$USER/.vscode-server/extensions`. Inside the container the server's data dir is `/home/.vscode-server`

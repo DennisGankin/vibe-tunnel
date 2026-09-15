@@ -8,10 +8,21 @@ VT_LOG_DIR=$VT_STATE_DIR/logs
 VT_JOB_DIR=$VT_STATE_DIR/jobs
 VT_USER_PROFILES=$VT_STATE_DIR/profiles
 VT_ENV=$VT_STATE_DIR/env
+VT_SITE_ENV=$VIBE_TUNNEL_DIR/site.env
 
-# Site settings written by setup.sh (EULER_VIBE_DIR, VT_IMAGE, VT_CODE_CLI, ...).
+# The state dir holds login tokens (sandbox home): private to the user.
+if [ ! -d "$VT_STATE_DIR" ]; then mkdir -p "$VT_STATE_DIR" 2>/dev/null && chmod 700 "$VT_STATE_DIR" 2>/dev/null || true; fi
+
+# Lab-wide defaults from the installation (site.env, kept by the maintainer),
+# then the user's own settings (~/.vibe-tunnel/env, written by setup.sh), which win.
+# shellcheck disable=SC1090
+[ -f "$VT_SITE_ENV" ] && . "$VT_SITE_ENV"
 # shellcheck disable=SC1090
 [ -f "$VT_ENV" ] && . "$VT_ENV"
+
+# A shared installation is one the user cannot write to (bin/, image, presets are
+# maintained by someone else); the user's state still lives in $VT_STATE_DIR.
+VT_SHARED=0; [ -w "$VIBE_TUNNEL_DIR" ] || VT_SHARED=1
 
 # Container image: our own, or -- as a fallback for sites that already run
 # euler-vibe -- its claude-mobile.sif.
@@ -44,7 +55,7 @@ fi
 VT_CODE_CLI=${VT_CODE_CLI:-$VIBE_TUNNEL_DIR/cli/code}
 [ -x "$VT_CODE_CLI" ] || { [ -x "$HOME/code" ] && VT_CODE_CLI=$HOME/code; } || true
 
-export VIBE_TUNNEL_DIR VT_STATE_DIR VT_LOG_DIR VT_IMAGE VT_SHELLRC VT_DEFAULT_HOME VT_CONFIG_DIR VT_OLD_CONFIG_DIR CLAUDE_LAUNCH_CONFIG_DIR VT_CODE_CLI EULER_VIBE_DIR
+export VIBE_TUNNEL_DIR VT_STATE_DIR VT_LOG_DIR VT_SHARED VT_IMAGE VT_SHELLRC VT_DEFAULT_HOME VT_CONFIG_DIR VT_OLD_CONFIG_DIR CLAUDE_LAUNCH_CONFIG_DIR VT_CODE_CLI EULER_VIBE_DIR
 
 # --- config files ------------------------------------------------------------------
 # Only the keys we (or claude-launch) write are allowed, so a config file stays

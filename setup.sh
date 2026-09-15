@@ -13,6 +13,11 @@ set -euo pipefail
 # On your laptop (no slurm here), `./setup.sh --client` instead puts bin/ on
 # your PATH and writes the client settings (ssh host, cluster path of this
 # repo, how to open tunnels) via `vibe-tunnel client-setup`.
+#
+# Shared installation: when this directory is not writable by you (a lab-wide
+# install maintained by someone else), setup only checks that image and CLI
+# are there, writes your private ~/.vibe-tunnel/env and adds bin/ to your PATH.
+# The maintainer runs it once with write access to build/download.
 
 REPO=$(cd "$(dirname "$(realpath "$0")")" && pwd)
 STATE_DIR=${VT_STATE_DIR:-$HOME/.vibe-tunnel}
@@ -109,9 +114,25 @@ if [ "$CLIENT" -eq 1 ] || { ! command -v sbatch >/dev/null 2>&1 && [ -z "${VT_ON
     exit 0
 fi
 
+# --- shared installation: nothing to build or download as a plain user ----------
+SHARED=0; [ -w "$REPO" ] || SHARED=1
+if [ "$SHARED" -eq 1 ]; then
+    # shellcheck disable=SC1091
+    [ -f "$REPO/site.env" ] && . "$REPO/site.env"
+    IMAGE=${VT_IMAGE:-$IMAGE}
+    step "Shared installation"
+    say "  ${DIM}$REPO is not writable by you: using it as installed${VT_MAINTAINER:+ (maintainer: $VT_MAINTAINER)}${RST}"
+    [ -e "$IMAGE" ] && ok "image: $IMAGE ($(du -h "$IMAGE" | cut -f1))" || warn "image missing: $IMAGE — ask the maintainer"
+    if [ -x "$CLI" ]; then ok "VS Code CLI: $CLI ($("$CLI" --version 2>/dev/null | head -n1))"
+    elif [ -x "$HOME/code" ]; then ok "VS Code CLI: $HOME/code (your own copy)"
+    else warn "VS Code CLI missing: $CLI — ask the maintainer"; fi
+    DO_BUILD=0; DO_CLI=0
+fi
+
 # --- 1. container image -----------------------------------------------------------
-step "Container image"
-if [ -n "$EULER_VIBE_DIR" ]; then
+[ "$SHARED" -eq 1 ] || step "Container image"
+if [ "$SHARED" -eq 1 ]; then :
+elif [ -n "$EULER_VIBE_DIR" ]; then
     EULER_VIBE_DIR=$(realpath "$EULER_VIBE_DIR")
     [ -d "$EULER_VIBE_DIR" ] || die "euler-vibe checkout not found: $EULER_VIBE_DIR"
     CLAUDE_MOBILE_IMAGE=$EULER_VIBE_DIR/images/claude-mobile.sif
@@ -123,7 +144,8 @@ if [ -n "$EULER_VIBE_DIR" ]; then
         warn "no built image in $EULER_VIBE_DIR; building vibe-tunnel's own instead"
     fi
 fi
-if [ "$DO_BUILD" -eq 0 ]; then
+if [ "$SHARED" -eq 1 ]; then :
+elif [ "$DO_BUILD" -eq 0 ]; then
     if [ -e "$IMAGE" ]; then ok "image: $IMAGE ($(du -h "$IMAGE" | cut -f1))"
     elif [ -z "${CLAUDE_MOBILE_IMAGE:-}" ] || [ ! -e "$CLAUDE_MOBILE_IMAGE" ]; then warn "no image at $IMAGE (--no-build); nothing can launch until one exists"; fi
 elif [ -e "$IMAGE" ] && [ "$FORCE" -eq 0 ]; then
@@ -152,8 +174,9 @@ else
 fi
 
 # --- 2. VS Code CLI ------------------------------------------------------------
-step "VS Code CLI"
-if [ "$DO_CLI" -eq 0 ]; then say "  ${DIM}skipped (--no-cli)${RST}"
+[ "$SHARED" -eq 1 ] || step "VS Code CLI"
+if [ "$SHARED" -eq 1 ]; then :
+elif [ "$DO_CLI" -eq 0 ]; then say "  ${DIM}skipped (--no-cli)${RST}"
 elif [ -x "$CLI" ] && [ "$FORCE" -eq 0 ]; then ok "present: $CLI ($("$CLI" --version 2>/dev/null | head -n1)) — --force to re-download"
 else
     case "$(uname -m)" in
@@ -179,10 +202,11 @@ fi
 
 # --- 3. site settings --------------------------------------------------------------
 step "Site settings"
-mkdir -p "$STATE_DIR/profiles" "$STATE_DIR/logs" "$STATE_DIR/jobs"
+mkdir -p "$STATE_DIR/profiles" "$STATE_DIR/logs" "$STATE_DIR/jobs" "$STATE_DIR/configs"
+chmod 700 "$STATE_DIR"   # holds login tokens (sandbox home)
 {
     printf '# vibe-tunnel site settings (written by setup.sh %s). Sourced by bin/vibe-tunnel-lib.\n' "$(date '+%Y-%m-%d')"
-    if [ "$IMAGE" != "$REPO/images/vibe-tunnel.sif" ]; then printf 'VT_IMAGE=%q\n' "$IMAGE"; else printf '# VT_IMAGE=%q\n' "$IMAGE"; fi
+    if [ "$IMAGE" != "$REPO/images/vibe-tunnel.sif" ] && [ "$IMAGE" != "${VT_IMAGE:-}" ]; then printf 'VT_IMAGE=%q\n' "$IMAGE"; else printf '# VT_IMAGE=%q\n' "$IMAGE"; fi
     if [ -n "$EULER_VIBE_DIR" ]; then printf 'EULER_VIBE_DIR=%q\n' "$EULER_VIBE_DIR"; else printf '# EULER_VIBE_DIR=/path/to/euler-vibe   # optional: reuse its image + sandbox home\n'; fi
     printf '# VT_CODE_CLI=%q\n' "$CLI"
     printf '# VT_DEFAULT_HOME=%q   # per-user sandbox home (Claude + VS Code logins, extensions)\n' "$STATE_DIR/home"
@@ -195,6 +219,10 @@ if [ "$DO_PATH" -eq 0 ]; then step "PATH"; say "  ${DIM}skipped (--no-path)${RST
 else add_path_block; fi
 
 step "Done"
+if [ "$SHARED" -eq 0 ] && [ "$DO_BUILD$DO_CLI" != "00" ]; then
+    say "  ${DIM}To offer this as a shared installation: chmod -R a+rX $REPO, copy site.env.example to site.env,${RST}"
+    say "  ${DIM}and tell people to run $REPO/setup.sh (they only get PATH + private settings).${RST}"
+fi
 say "  Check everything with:   ${CYAN}$REPO/bin/vibe-tunnel doctor${RST}"
 say "  Start a tunnel by hand:  ${CYAN}vibe-tunnel submit cpu_4h --name test${RST}"
 say "  …or from your laptop:    clone this repo there and run ${CYAN}./setup.sh --client${RST}"
