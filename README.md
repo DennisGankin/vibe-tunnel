@@ -60,8 +60,9 @@ vibe-tunnel
 ```
 The same `vibe-tunnel` command works on the laptop and on the cluster; on the laptop it drives the cluster copy over ssh.
 
-1. the launch menu opens on the cluster: workspace, sandbox home, extra read-only / read-write directories (Tab-completes cluster paths), resource profile and tunnel label, all visible at once; save or reuse named configs
-2. Launch submits the job; the laptop waits, handles the one-time VS Code login (opens GitHub's device page, copies the code), then opens desktop VS Code at `/workspace` inside the container
+1. the menu opens on the cluster. The home screen lists your running tunnels and asks what to do: reconnect to one, start a new VS Code tunnel, or run Claude / a shell in the container without VS Code
+2. for a new run you pick a saved config (or start from scratch), then a setup screen shows the choice and has two submenus: *Sandbox* (workspace, home, extra read-only / read-write directories, Tab-completes cluster paths) and *Resources* (profile, time, CPUs, memory, GPUs), plus the tunnel label; save it as a config for next time
+3. Launch submits the job; the laptop waits, handles the one-time VS Code login (opens GitHub's device page, copies the code), then opens desktop VS Code at `/workspace` inside the container. Reconnecting to a running tunnel opens VS Code straight away
 
 Other laptop commands (all run on the cluster over ssh):
 ```bash
@@ -76,8 +77,9 @@ vibe-tunnel logs <jobid> -f
 ```bash
 vibe-tunnel launch                   # arrow-key menu: workspace, home, binds, profile, label -> submit + wait
 ```
-The menu shows the whole setup at once (like euler-vibe's `claude-launch`, which it is adapted from), Tab-completes
-cluster paths, and can save the setup as a named config. Saved configs live in
+The menu (adapted from euler-vibe's `claude-launch`) starts with your running tunnels and the choice
+reconnect / new tunnel / Claude in a terminal / shell; a new run gets a setup screen with Sandbox and Resources
+submenus and can be saved as a named config. Saved configs live in
 `~/.config/vibe-tunnel/configs/NAME.conf` and include the resource profile and label, so a later start is just:
 ```bash
 vibe-tunnel submit --config myproj   # profile, resources + label come from the config; flags override
