@@ -64,6 +64,25 @@ trap 'rm -rf "$VT_TMPDIR" 2>/dev/null || true' EXIT
 
 # --- 3. container invocation -------------------------------------------------
 vt_container_args
+
+# First run with the per-user VS Code login store: seed it from a login saved
+# per sandbox home by earlier versions (this home, the default home, or any
+# home a saved config points at), so nobody re-does the GitHub device login.
+seed_vscode_login() {
+    local store=${VT_VSCODE_AUTH:-$VT_STATE_DIR/vscode-auth}/token.json cand d f
+    [ -f "$store" ] && return 0
+    local homes=("$CLAUDE_MOBILE_HOME" "$VT_DEFAULT_HOME")
+    for d in "$VT_CONFIG_DIR" "${VT_OLD_CONFIG_DIR:-}" "$CLAUDE_LAUNCH_CONFIG_DIR"; do
+        [ -d "$d" ] || continue
+        for f in "$d"/*.conf; do [ -f "$f" ] && config_is_valid "$f" && homes+=("$(config_field "$f" CLAUDE_MOBILE_HOME)"); done
+    done
+    for cand in "${homes[@]}"; do
+        [ -n "$cand" ] && [ -f "$cand/.vscode-cli/token.json" ] || continue
+        cp -f "$cand/.vscode-cli/token.json" "$store" && chmod 600 "$store" && log "VS Code login taken over from $cand" && return 0
+    done
+    return 0
+}
+seed_vscode_login
 vt_container_env "VT_MODE=$VT_MODE" "VT_TUNNEL_NAME=$TUNNEL_NAME" "VT_JOB_ID=${SLURM_JOB_ID:-local}" \
     "VT_EXTENSIONS=$EXTENSIONS" "VT_HOST_WORKSPACE=$WORKSPACE" "VT_HOST_NODE=$(hostname -s)"
 
