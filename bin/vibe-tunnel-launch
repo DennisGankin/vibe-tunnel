@@ -7,7 +7,8 @@ set -euo pipefail
 # shows the whole setup at once -- workspace, sandbox home, extra read-only /
 # read-write directories (Tab completion), resource profile, tunnel label --
 # lets you save/reuse it as a named config, then submits the job and waits for
-# the tunnel link. Adapted from euler-vibe's claude-launch (MIT, jurgjn).
+# the tunnel link -- or, in mode claude/shell, runs the container right here.
+# Adapted from euler-vibe's claude-launch (MIT, jurgjn).
 #
 #   vibe-tunnel launch [--config NAME] [--no-wait]
 #
@@ -242,16 +243,26 @@ print_binds() {
 }
 
 profile_line() {
+    if [ "$MODE" != tunnel ]; then printf '%s(not used: runs here, no slurm job)%s' "$DIM" "$RST"; return; fi
     if [ -n "$PROFILE" ]; then printf '%s%s%s  %s%s%s' "$MAG" "$PROFILE" "$RST" "$DIM" "$(profile_summary "$PROFILE")" "$RST"
     else printf '%s(none chosen)%s' "$RED" "$RST"; fi
 }
 label_line() {
+    if [ "$MODE" != tunnel ]; then printf '%s(not used)%s' "$DIM" "$RST"; return; fi
     if [ -n "$LABEL" ]; then printf '%s%s%s  %s→ vscode-remote://tunnel+%s/workspace%s' "$GREEN" "$LABEL" "$RST" "$DIM" "$LABEL" "$RST"
     else printf '%s(none: vibe-<jobid>)%s' "$DIM" "$RST"; fi
 }
 
+mode_hint() {
+    case "$MODE" in
+        tunnel) printf 'slurm job + VS Code tunnel into the container' ;;
+        claude) printf 'Claude Code in the container, in this terminal' ;;
+        shell)  printf 'a shell in the container, in this terminal' ;;
+    esac
+}
+
 render_header_compact() {
-    printf '  %s● vibe-tunnel%s  %s·%s  %s%s%s%s\n' "$BOLD$GREEN" "$RST" "$DIM" "$RST" "$GREEN" "$MODE" "$RST" "$EL"
+    printf '  %s● vibe-tunnel%s  %s·%s  %s%s%s %s%s%s%s\n' "$BOLD$GREEN" "$RST" "$DIM" "$RST" "$GREEN" "$MODE" "$RST" "$DIM" "$(mode_hint)" "$RST" "$EL"
     printf '  %sWorkspace%s %s%s%s%s\n' "$BOLD" "$RST" "$YELLOW" "$(tilde "$WORKSPACE")" "$RST" "$EL"
     printf '  %sHome%s      %s%s%s%s\n' "$BOLD" "$RST" "$CYAN" "$(tilde "$CLAUDE_MOBILE_HOME")" "$RST" "$EL"
     printf '  %sProfile%s   %s%s\n' "$BOLD" "$RST" "$(profile_line)" "$EL"
@@ -271,7 +282,7 @@ render_header() {
         "$CYAN" "$RST" "$BOLD$GREEN" "$RST" "$DIM" "$RST" "$CYAN" "$RST" "$EL"
     printf '  %s╰────────────────────────────────────────────────────────────╯%s%s\n' "$CYAN" "$RST" "$EL"
     printf '%s\n' "$EL"
-    printf '  %sMode%s       %s%s%s%s\n' "$BOLD" "$RST" "$GREEN" "$MODE" "$RST" "$EL"
+    printf '  %sMode%s       %s%s%s  %s%s%s%s\n' "$BOLD" "$RST" "$GREEN" "$MODE" "$RST" "$DIM" "$(mode_hint)" "$RST" "$EL"
     printf '%s\n' "$EL"
     printf '  %sWorkspace%s  %s%s%s%s\n' "$BOLD" "$RST" "$YELLOW" "$(tilde "$WORKSPACE")" "$RST" "$EL"
     printf '             %s↳ /workspace in the container: VS Code opens here, Claude can read & edit%s%s\n' "$DIM" "$RST" "$EL"
@@ -292,18 +303,18 @@ render_header() {
 # --- actions -----------------------------------------------------------------
 build_submit_args() {
     local b
-    printf '%s\n' "$PROFILE"
+    [ "$MODE" != tunnel ] || printf '%s\n' "$PROFILE"
     printf '%s\n%s\n' "--workspace" "$WORKSPACE"
     [ -z "$CLAUDE_MOBILE_HOME" ] || printf '%s\n%s\n' "--home" "$CLAUDE_MOBILE_HOME"
     for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do printf '%s\n%s\n' "--rw" "$b"; done
     for b in "${RO_BINDS[@]+"${RO_BINDS[@]}"}"; do printf '%s\n%s\n' "--ro" "$b"; done
-    [ -z "$LABEL" ] || printf '%s\n%s\n' "--name" "$LABEL"
+    [ "$MODE" != tunnel ] || [ -z "$LABEL" ] || printf '%s\n%s\n' "--name" "$LABEL"
 }
 
 review_command() {
     render_header
     printf '  %sWould run:%s%s\n' "$BOLD" "$RST" "$EL"
-    printf '    %svibe-tunnel submit%s' "$CYAN" "$RST"
+    if [ "$MODE" = tunnel ]; then printf '    %svibe-tunnel submit%s' "$CYAN" "$RST"; else printf '    %svibe-tunnel %s%s' "$CYAN" "$MODE" "$RST"; fi
     while IFS= read -r a; do printf ' %q' "$a"; done < <(build_submit_args)
     printf '%s\n%s\n' "$EL" "$EL"
     printf '  %sThe job then starts the container with these mounts and runs `code tunnel` inside it.%s%s\n' "$DIM" "$RST" "$EL"
@@ -344,6 +355,19 @@ change_profile() {
     [ "${MENU_CHOICE}" -ge 0 ] 2>/dev/null || return
     [ "${MENU_CHOICE}" -lt "${#PROFILE_NAMES[@]}" ] || return
     PROFILE=${PROFILE_NAMES[$MENU_CHOICE]}
+}
+
+change_mode() {
+    case "$MODE" in tunnel) MENU_DEFAULT=0 ;; claude) MENU_DEFAULT=1 ;; shell) MENU_DEFAULT=2 ;; esac
+    menu_select "Pick what to launch:" \
+        "tunnel  — slurm job with a VS Code tunnel into the container (default)" \
+        "claude  — Claude Code in the container, right here in this terminal" \
+        "shell   — plain shell in the container, right here in this terminal"
+    case "${MENU_CHOICE}" in
+        0) MODE=tunnel ;;
+        1) MODE=claude ;;
+        2) MODE=shell ;;
+    esac
 }
 
 set_label() {
@@ -397,7 +421,7 @@ load_config_file() {
     RW_BINDS=(); RO_BINDS=(); PROFILE=; LABEL=
     # shellcheck disable=SC1090
     . "$f"
-    MODE=tunnel
+    case "$MODE" in tunnel|claude|shell) ;; *) MODE=tunnel ;; esac
     [ -n "$CLAUDE_MOBILE_HOME" ] || CLAUDE_MOBILE_HOME=$saved_home
     return 0
 }
@@ -479,6 +503,12 @@ reuse_config() {
 
 # --- launch --------------------------------------------------------------------
 launch() {
+    if [ "$MODE" != tunnel ]; then
+        local args=()
+        while IFS= read -r a; do args+=("$a"); done < <(build_submit_args)
+        cls; show_cursor; trap - EXIT
+        exec "$VT" "$MODE" "${args[@]}"
+    fi
     if [ -z "$PROFILE" ]; then
         change_profile
         [ -n "$PROFILE" ] || return
@@ -528,6 +558,7 @@ while true; do
         "Remove an extra bind" \
         "Change resource profile (CPUs, GPUs, time)" \
         "Set tunnel label" \
+        "Change mode (tunnel / claude / shell)" \
         "Reuse a saved config" \
         "Save current config" \
         "Review submit command" \
@@ -541,11 +572,12 @@ while true; do
         4) remove_bind ;;
         5) change_profile ;;
         6) set_label ;;
-        7) reuse_config ;;
-        8) save_config ;;
-        9) review_command ;;
-        10) launch ;;
-        11|-2) cls; printf '%s  Bye.%s\n' "$DIM" "$RST"; exit 0 ;;
+        7) change_mode ;;
+        8) reuse_config ;;
+        9) save_config ;;
+        10) review_command ;;
+        11) launch ;;
+        12|-2) cls; printf '%s  Bye.%s\n' "$DIM" "$RST"; exit 0 ;;
         *) : ;;
     esac
 done

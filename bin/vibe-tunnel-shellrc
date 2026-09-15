@@ -1,0 +1,34 @@
+# vibe-tunnel-shellrc -----------------------------------------------------------
+# Sourced by every shell inside the container: VS Code integrated terminals (via
+# the block vibe-tunnel-entry adds to ~/.bashrc) and `vibe-tunnel shell/claude`.
+# Adapted from euler-vibe's claude-mobile-shellrc.
+
+case "${PS1-}" in *vibe-tunnel*) ;; *) export PS1='(vibe-tunnel) \w \$ ' ;; esac
+
+# Prefer the persistent, self-updatable Claude install in the sandbox home over
+# the npm build baked into the image: /usr is read-only, so the bundled build
+# can never update itself, while ~/.local/bin/claude can (`claude update`).
+export PATH="$HOME/.local/bin:$PATH"
+
+# One-time bootstrap if the entry script has not done it yet (e.g. a home that
+# was created by hand). Safe before login: it only downloads the build.
+if [ ! -x "$HOME/.local/bin/claude" ] && command -v claude >/dev/null 2>&1; then
+    echo "vibe-tunnel: installing self-updatable native claude to ~/.local (one-time)…"
+    command claude install latest \
+        || echo "vibe-tunnel: 'claude install' failed; using the bundled build for now."
+    hash -r
+fi
+
+# `claude` in a terminal runs with --dangerously-skip-permissions because Claude's
+# own sandbox cannot run inside Apptainer; the container *is* the sandbox.
+# Management subcommands pass through untouched. Set VT_CLAUDE_ASK=1 to keep
+# Claude's normal permission prompts instead.
+claude() {
+    case "${1:-}" in
+        config|mcp|update|doctor|install|--help|-h|--version|-v)
+            command claude "$@" ;;
+        *)
+            if [ -n "${VT_CLAUDE_ASK:-}" ]; then command claude "$@"
+            else command claude --dangerously-skip-permissions "$@"; fi ;;
+    esac
+}

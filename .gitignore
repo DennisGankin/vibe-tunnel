@@ -3,3 +3,7 @@ cli/code
 cli/*.tar.gz
 
 .DS_Store
+
+# Built container images and the runtime sandbox homes (logins, VS Code server, ...)
+images/*.sif
+home/
