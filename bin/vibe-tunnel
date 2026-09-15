@@ -20,6 +20,9 @@ set -euo pipefail
 #   vibe-tunnel logs JOBID [-f]           tail the job log
 #   vibe-tunnel stop JOBID|LABEL          scancel
 #   vibe-tunnel configs [--porcelain]     saved sandbox configs (own + claude-launch's)
+#   vibe-tunnel config show NAME [--porcelain] | save NAME [--profile P] [--mode M] [sandbox opts]
+#                                       | delete NAME        (used by the VS Code extension)
+#   vibe-tunnel ls [DIR] [--porcelain]    subdirectories of DIR (remote directory browser)
 #   vibe-tunnel profiles [--porcelain]    available sbatch resource profiles (presets)
 #   vibe-tunnel profiles show|edit NAME   print / edit a profile (edit copies a repo one to ~/.vibe-tunnel/profiles)
 #   vibe-tunnel profiles new NAME [--from BASE]   create your own profile from a preset and edit it
@@ -54,7 +57,7 @@ ok()   { printf '  %s✓%s %s\n' "$GREEN" "$RST" "$*"; }
 warn() { printf '  %s!%s %s\n' "$YELLOW" "$RST" "$*"; }
 die()  { printf '%svibe-tunnel: %s%s\n' "$RED" "$*" "$RST" >&2; exit 1; }
 
-usage() { sed -n '4,31p' "$VT_BIN" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,34p' "$VT_BIN" | sed 's/^# \{0,1\}//'; }
 
 # --- helpers ---------------------------------------------------------------
 
@@ -445,6 +448,83 @@ profiles_new() {
     printf '  %s: %s\n' "$name" "$(profile_summary "$f")"
 }
 
+# --- config show / save / delete ------------------------------------------------
+cmd_config() {
+    local sub=${1:-}; shift || true
+    case "$sub" in
+        show)   config_show "$@" ;;
+        save)   config_save "$@" ;;
+        delete) config_delete "$@" ;;
+        *) die "config needs show|save|delete" ;;
+    esac
+}
+config_show() {
+    local name=${1:-} porcelain=0; [ "${2:-}" = "--porcelain" ] && porcelain=1
+    [ -n "$name" ] || die "config show needs a NAME"
+    local f; f=$(find_config "$name") || die "config not found: $name"
+    config_is_valid "$f" || die "config has unexpected content: $f"
+    local src=other; case "$f" in "$VT_CONFIG_DIR"/*) src=vibe-tunnel ;; "$VT_OLD_CONFIG_DIR"/*) src=old-location ;; "$CLAUDE_LAUNCH_CONFIG_DIR"/*) src=claude-launch ;; esac
+    VT_CONFIG_FILE=$f VT_WORKSPACE= VT_HOME= VT_RW_BINDS=() VT_RO_BINDS=()
+    WORKSPACE= CLAUDE_MOBILE_HOME= RW_BINDS=() RO_BINDS=() MODE= PROFILE= LABEL= TIME= CPUS= MEM= GPUS= PARTITION= ACCOUNT=
+    # shellcheck disable=SC1090
+    . "$f"
+    if [ "$porcelain" -eq 1 ]; then
+        printf 'NAME=%s\nFILE=%s\nSOURCE=%s\nWORKSPACE=%s\nMODE=%s\nHOME=%s\nPROFILE=%s\nLABEL=%s\n' \
+            "$name" "$f" "$src" "$WORKSPACE" "${MODE:-tunnel}" "$CLAUDE_MOBILE_HOME" "$PROFILE" "$LABEL"
+        printf 'TIME=%s\nCPUS=%s\nMEM=%s\nGPUS=%s\nPARTITION=%s\nACCOUNT=%s\n' "$TIME" "$CPUS" "$MEM" "$GPUS" "$PARTITION" "$ACCOUNT"
+        local b; for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do printf 'RW=%s\n' "$b"; done
+        for b in "${RO_BINDS[@]+"${RO_BINDS[@]}"}"; do printf 'RO=%s\n' "$b"; done
+    else
+        printf '%s# %s (%s)%s\n' "$DIM" "$f" "$src" "$RST"; grep -v '^#' "$f"
+    fi
+}
+# config save NAME [--profile P] [--mode tunnel|claude|shell] [--workspace D] [--home D] [--rw ..] [--ro ..]
+#                  [--name LABEL] [--time ..] [--cpus ..] [--mem ..] [--gpus ..] [--partition ..] [--account ..]
+config_save() {
+    local name=${1:-}; shift || true
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "invalid config name: '$name' (letters, digits, . _ -)"
+    local mode=tunnel rest=() profile=
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --profile) profile=$2; shift ;;
+            --mode)    mode=$2; shift ;;
+            *)         rest+=("$1") ;;
+        esac; shift
+    done
+    case "$mode" in tunnel|claude|shell) ;; *) die "mode must be tunnel, claude or shell" ;; esac
+    parse_sandbox_opts "${rest[@]+"${rest[@]}"}"
+    [ -z "$OPT_PROFILE" ] || profile=$OPT_PROFILE
+    [ -z "$profile" ] || resolve_profile "$profile" >/dev/null || die "profile not found: $profile"
+    WORKSPACE=${OPT_WORKSPACE:-$(pwd)}
+    CLAUDE_MOBILE_HOME=${OPT_HOME:-$VT_DEFAULT_HOME}
+    RW_BINDS=("${OPT_RW[@]+"${OPT_RW[@]}"}"); RO_BINDS=("${OPT_RO[@]+"${OPT_RO[@]}"}")
+    MODE=$mode PROFILE=$profile LABEL=$(sanitize_name "${OPT_LABEL:-}")
+    write_config_file "$VT_CONFIG_DIR/$name.conf" "$name"
+    printf 'saved %s\n' "$VT_CONFIG_DIR/$name.conf"
+}
+config_delete() {
+    local name=${1:-}; [ -n "$name" ] || die "config delete needs a NAME"
+    local f=$VT_CONFIG_DIR/$name.conf
+    [ -f "$f" ] || die "no config '$name' in $VT_CONFIG_DIR (configs from other locations are not deleted here)"
+    rm -f "$f" && printf 'deleted %s\n' "$f"
+}
+
+# --- ls: subdirectories, for a remote directory browser -------------------------
+cmd_ls() {
+    local dir=${1:-$HOME} porcelain=0
+    [ "$dir" = "--porcelain" ] && { dir=$HOME; porcelain=1; }
+    [ "${2:-}" = "--porcelain" ] && porcelain=1
+    case "$dir" in "~") dir=$HOME ;; "~/"*) dir=$HOME/${dir#"~/"} ;; esac
+    [ -d "$dir" ] || die "not a directory: $dir"
+    dir=$(cd "$dir" && pwd -P)
+    [ "$porcelain" -eq 1 ] && printf 'DIR=%s\n' "$dir"
+    local d
+    while IFS= read -r d; do
+        [ -n "$d" ] || continue
+        if [ "$porcelain" -eq 1 ]; then printf '%s\n' "${d##*/}"; else printf '  %s/\n' "${d##*/}"; fi
+    done < <(find "$dir" -mindepth 1 -maxdepth 1 -type d ! -name '.*' 2>/dev/null | sort)
+}
+
 # --- doctor -----------------------------------------------------------------
 cmd_doctor() {
     printf '%s== vibe-tunnel doctor ==%s\n' "$BOLD" "$RST"
@@ -493,6 +573,8 @@ case "$cmd" in
     logs)     cmd_logs "$@" ;;
     stop)     cmd_stop "$@" ;;
     configs)  cmd_configs "$@" ;;
+    config)   cmd_config "$@" ;;
+    ls)       cmd_ls "$@" ;;
     profiles) cmd_profiles "$@" ;;
     doctor)   cmd_doctor "$@" ;;
     ""|-h|--help|help) usage ;;

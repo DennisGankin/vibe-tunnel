@@ -100,7 +100,15 @@ as installed. `vibe-tunnel doctor` reports "shared installation" and the maintai
 Slurm accounts: the presets carry the group's accounts; a user on a different account changes it once under
 *Resources* and saves the config, or creates an own profile.
 
-## 6. Operational notes
+## 6. VS Code extension (developers)
+
+`vscode-extension/` holds the sidebar extension. It has no cluster-side parts: it calls `vibe-tunnel status|configs|
+profiles|config show|config save|config delete|ls|submit|wait|stop|logs` over ssh and parses their `--porcelain`
+/ `--json` output (`src/cluster.ts`, testable with a fake ssh). Build: `npm install && npm run compile && npm run
+package` in that directory; commit the resulting `.vsix` so members can install it without a toolchain. Bump
+`version` in `package.json` for each release.
+
+## 7. Operational notes
 
 - **Logs**: `~/.vibe-tunnel/logs/<jobid>.log` is the slurm output and the only log; `vibe-tunnel wait` parses it. `vibe-tunnel show <jobid>` prints state + log in one go.
 - **Concurrency**: one job per label. Each job has its own `--cli-data-dir` (`/home/.vscode-cli/jobs/<jobid>`), which avoids the singleton-lock retries seen in the old `tunnel_output_*.log` files when a data dir was reused across nodes. Dirs older than 7 days are pruned at job start.
@@ -110,7 +118,7 @@ Slurm accounts: the presets carry the group's accounts; a user on a different ac
 - **Terminal use without VS Code**: `vibe-tunnel claude|shell [--config N | --workspace D ...]` runs the same container interactively on the current node; use it inside an interactive slurm job.
 - **Cleaning up**: `rm -rf ~/.vibe-tunnel/jobs/*` (settings of past submissions) and old logs are safe to delete any time. Configs in `~/.vibe-tunnel/configs` and the sandbox home in `~/.vibe-tunnel/home` are the state you want to keep.
 
-## 7. Extensions and settings live in the sandbox home
+## 8. Extensions and settings live in the sandbox home
 
 With `codeserver_tunnel` the VS Code server ran on the node with your cluster `$HOME`, so extensions were in
 `/cluster/home/$USER/.vscode-server/extensions`. Inside the container the server's data dir is `/home/.vscode-server`

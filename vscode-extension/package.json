@@ -1,0 +1,283 @@
+{
+  "name": "vibe-tunnel",
+  "displayName": "vibe-tunnel",
+  "description": "VS Code + Claude Code inside a sandboxed container on the Euler cluster: start, reconnect and stop tunnels from the sidebar.",
+  "version": "0.1.0",
+  "publisher": "dennisgankin",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DennisGankin/vibe-tunnel"
+  },
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "keywords": [
+    "slurm",
+    "euler",
+    "tunnel",
+    "claude",
+    "hpc"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "vibeTunnel",
+          "title": "vibe-tunnel",
+          "icon": "media/vibe-tunnel.svg"
+        }
+      ]
+    },
+    "views": {
+      "vibeTunnel": [
+        {
+          "id": "vibeTunnel.view",
+          "name": "Tunnels & configs",
+          "icon": "media/vibe-tunnel.svg",
+          "contextualTitle": "vibe-tunnel"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "vibeTunnel.view",
+        "contents": "Connect to the cluster to see your tunnels.\n[Refresh](command:vibeTunnel.refresh)\n\nIf ssh needs a passphrase or one-time code, log in once in a terminal:\n[Log in via terminal](command:vibeTunnel.loginTerminal)\n\nSettings: host and installation path under **vibe-tunnel** in the settings.",
+        "when": "vibeTunnel.state == 'error'"
+      }
+    ],
+    "commands": [
+      {
+        "command": "vibeTunnel.refresh",
+        "title": "Refresh",
+        "category": "vibe-tunnel",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "vibeTunnel.newTunnel",
+        "title": "New tunnel\u2026",
+        "category": "vibe-tunnel",
+        "icon": "$(add)"
+      },
+      {
+        "command": "vibeTunnel.connect",
+        "title": "Connect",
+        "category": "vibe-tunnel",
+        "icon": "$(plug)"
+      },
+      {
+        "command": "vibeTunnel.stop",
+        "title": "Stop tunnel",
+        "category": "vibe-tunnel",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "vibeTunnel.logs",
+        "title": "Show log",
+        "category": "vibe-tunnel",
+        "icon": "$(output)"
+      },
+      {
+        "command": "vibeTunnel.launchConfig",
+        "title": "Launch",
+        "category": "vibe-tunnel",
+        "icon": "$(play)"
+      },
+      {
+        "command": "vibeTunnel.editConfig",
+        "title": "Edit config\u2026",
+        "category": "vibe-tunnel",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "vibeTunnel.deleteConfig",
+        "title": "Delete config",
+        "category": "vibe-tunnel",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "vibeTunnel.claudeTerminal",
+        "title": "Claude Code in a terminal (this sandbox)",
+        "category": "vibe-tunnel",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "vibeTunnel.shellTerminal",
+        "title": "Shell in the container (this sandbox)",
+        "category": "vibe-tunnel"
+      },
+      {
+        "command": "vibeTunnel.openMenu",
+        "title": "Open the terminal menu on the cluster",
+        "category": "vibe-tunnel",
+        "icon": "$(list-selection)"
+      },
+      {
+        "command": "vibeTunnel.loginTerminal",
+        "title": "Log in to the cluster via terminal",
+        "category": "vibe-tunnel",
+        "icon": "$(key)"
+      },
+      {
+        "command": "vibeTunnel.doctor",
+        "title": "Doctor (check the cluster installation)",
+        "category": "vibe-tunnel"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "vibeTunnel.newTunnel",
+          "when": "view == vibeTunnel.view",
+          "group": "navigation@1"
+        },
+        {
+          "command": "vibeTunnel.refresh",
+          "when": "view == vibeTunnel.view",
+          "group": "navigation@2"
+        },
+        {
+          "command": "vibeTunnel.openMenu",
+          "when": "view == vibeTunnel.view",
+          "group": "navigation@3"
+        },
+        {
+          "command": "vibeTunnel.loginTerminal",
+          "when": "view == vibeTunnel.view",
+          "group": "1_more"
+        },
+        {
+          "command": "vibeTunnel.doctor",
+          "when": "view == vibeTunnel.view",
+          "group": "1_more"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "vibeTunnel.connect",
+          "when": "view == vibeTunnel.view && viewItem == tunnel",
+          "group": "inline@1"
+        },
+        {
+          "command": "vibeTunnel.stop",
+          "when": "view == vibeTunnel.view && viewItem =~ /tunnel/",
+          "group": "inline@2"
+        },
+        {
+          "command": "vibeTunnel.logs",
+          "when": "view == vibeTunnel.view && viewItem =~ /tunnel/",
+          "group": "inline@3"
+        },
+        {
+          "command": "vibeTunnel.launchConfig",
+          "when": "view == vibeTunnel.view && viewItem =~ /config/",
+          "group": "inline@1"
+        },
+        {
+          "command": "vibeTunnel.editConfig",
+          "when": "view == vibeTunnel.view && viewItem == config-own",
+          "group": "inline@2"
+        },
+        {
+          "command": "vibeTunnel.claudeTerminal",
+          "when": "view == vibeTunnel.view && viewItem =~ /config/",
+          "group": "1_run@1"
+        },
+        {
+          "command": "vibeTunnel.shellTerminal",
+          "when": "view == vibeTunnel.view && viewItem =~ /config/",
+          "group": "1_run@2"
+        },
+        {
+          "command": "vibeTunnel.deleteConfig",
+          "when": "view == vibeTunnel.view && viewItem == config-own",
+          "group": "2_manage"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "vibeTunnel.connect",
+          "when": "false"
+        },
+        {
+          "command": "vibeTunnel.stop",
+          "when": "false"
+        },
+        {
+          "command": "vibeTunnel.logs",
+          "when": "false"
+        },
+        {
+          "command": "vibeTunnel.launchConfig",
+          "when": "false"
+        },
+        {
+          "command": "vibeTunnel.editConfig",
+          "when": "false"
+        },
+        {
+          "command": "vibeTunnel.deleteConfig",
+          "when": "false"
+        },
+        {
+          "command": "vibeTunnel.claudeTerminal",
+          "when": "false"
+        },
+        {
+          "command": "vibeTunnel.shellTerminal",
+          "when": "false"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "vibe-tunnel",
+      "properties": {
+        "vibeTunnel.host": {
+          "type": "string",
+          "default": "euler",
+          "description": "ssh host or alias of the cluster (from your ~/.ssh/config)."
+        },
+        "vibeTunnel.remoteDir": {
+          "type": "string",
+          "default": "/cluster/project/beltrao/software/vibe-tunnel",
+          "description": "Path of the vibe-tunnel installation on the cluster."
+        },
+        "vibeTunnel.sshPath": {
+          "type": "string",
+          "default": "ssh",
+          "description": "ssh executable (default: ssh on PATH; Windows ships one in C:\\Windows\\System32\\OpenSSH)."
+        },
+        "vibeTunnel.openIn": {
+          "type": "string",
+          "enum": [
+            "window",
+            "browser"
+          ],
+          "default": "window",
+          "description": "Open a ready tunnel in a new VS Code window, or show the vscode.dev link."
+        },
+        "vibeTunnel.refreshSeconds": {
+          "type": "number",
+          "default": 30,
+          "description": "How often the sidebar refreshes while visible (0 = manual)."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "package": "vsce package --no-dependencies"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/vsce": "^3.0.0",
+    "typescript": "^5.5.0"
+  }
+}
