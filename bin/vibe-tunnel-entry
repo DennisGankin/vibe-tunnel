@@ -21,7 +21,9 @@ log() {
 }
 
 export HOME=/home
-cd /workspace 2>/dev/null || cd /
+# The workspace is mounted at its cluster path (and at /workspace).
+WORKSPACE=${VT_HOST_WORKSPACE:-/workspace}
+cd "$WORKSPACE" 2>/dev/null || cd /workspace 2>/dev/null || cd /
 export PATH="$HOME/.local/bin:$PATH"
 TUNNEL_NAME=${VT_TUNNEL_NAME:-vibe-${VT_JOB_ID:-$$}}
 SHELLRC=/opt/vibe-tunnel/shellrc
@@ -60,7 +62,7 @@ case "$MODE" in
     claude)
         # Claude in the workspace; when it exits, stay in the container shell.
         exec bash --rcfile "$SHELLRC" -ic '
-            cd /workspace 2>/dev/null || true
+            cd "$VT_HOST_WORKSPACE" 2>/dev/null || cd /workspace 2>/dev/null || true
             claude "$@"
             status=$?
             echo
@@ -121,10 +123,10 @@ fi
 
 # --- 5. run -----------------------------------------------------------------------
 echo "------------------------------------------------------------"
-echo "sandbox    : /workspace = ${VT_HOST_WORKSPACE:-?} on ${VT_HOST_NODE:-?}"
+echo "workspace  : $WORKSPACE on ${VT_HOST_NODE:-?}"
 echo "tunnel     : $TUNNEL_NAME"
-echo "desktop    : code --folder-uri 'vscode-remote://tunnel+$TUNNEL_NAME/workspace'"
-echo "browser    : https://vscode.dev/tunnel/$TUNNEL_NAME/workspace"
+echo "desktop    : code --folder-uri 'vscode-remote://tunnel+$TUNNEL_NAME$WORKSPACE'"
+echo "browser    : https://vscode.dev/tunnel/$TUNNEL_NAME$WORKSPACE"
 echo "------------------------------------------------------------"
 
 tunnel_pid= terminated=0

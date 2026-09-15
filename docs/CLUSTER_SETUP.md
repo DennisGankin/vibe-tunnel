@@ -50,7 +50,7 @@ Expected in the log, in order:
 4. first time per home: `To grant access to the server, please log into https://github.com/login/device and use code XXXX-XXXX`
 5. `Open this link in your browser https://vscode.dev/tunnel/test/workspace`
 
-Then, on the laptop: `code --folder-uri 'vscode-remote://tunnel+test/workspace'`. The integrated terminal should show the `(claude-mobile)` prompt from euler-vibe's shellrc, `pwd` = `/workspace`, `claude --version` works, and `ls /` shows the container, not the node.
+Then, on the laptop: the `code --folder-uri ...` line that `vibe-tunnel wait` prints (the workspace keeps its cluster path inside the container). The integrated terminal should show the `(vibe-tunnel)` prompt, `pwd` = the workspace's cluster path, `claude --version` works, and `ls /` shows the container, not the node.
 
 `scancel` (or `vibe-tunnel stop test`) should leave `vibe-tunnel: tunnel 'test' unregistered` at the end of the log.
 
@@ -72,6 +72,7 @@ Each remaining assumption has a fallback; fix the script if reality differs.
 | `code tunnel unregister` on exit frees the tunnel name (accounts are capped at a handful of tunnels) | `bin/vibe-tunnel-entry` | stale tunnels accumulate; clean up with `code tunnel unregister` / the Remote Explorer in VS Code |
 | `--signal=B:TERM@120` reaches the job script and Apptainer forwards TERM into the container | `profiles/*.sbatch`, `bin/vibe-tunnel-job` | the tunnel is killed without unregistering (harmless, see previous row) |
 | `vscode-remote://tunnel+<name>/workspace` opens the tunnel in desktop VS Code | `bin/vibe-tunnel-client` | use the printed `https://vscode.dev/tunnel/...` link and its *Open in VS Code Desktop* button |
+| Apptainer creates bind destinations that do not exist in the image (the workspace is mounted at its `/cluster/...` path; needs the default underlay/overlay support) | `bin/vibe-tunnel-lib` | fall back to `/workspace` only: drop the same-path bind |
 | `--nv` on a non-GPU node only warns | `bin/vibe-tunnel-lib` | drop `--nv` for CPU profiles via an env toggle (euler-vibe passes it unconditionally too) |
 
 ## 5. Operational notes
@@ -80,9 +81,9 @@ Each remaining assumption has a fallback; fix the script if reality differs.
 - **Concurrency**: one job per label. Each job has its own `--cli-data-dir` (`/home/.vscode-cli/jobs/<jobid>`), which avoids the singleton-lock retries seen in the old `tunnel_output_*.log` files when a data dir was reused across nodes. Dirs older than 7 days are pruned at job start.
 - **Disk**: the VS Code server (~200 MB per VS Code version) and extensions live in `/home/.vscode-server` of the sandbox home, shared by all jobs of that home.
 - **Time limits**: the tunnel dies with the job. VS Code shows a reconnect dialog; start a new job and reopen.
-- **Several homes**: a different `CLAUDE_MOBILE_HOME` means separate Claude login, VS Code login, server cache and `.bashrc`. Choose it per config in the launch menu or with `--home`. The default is `home/default` in the repo (gitignored), or euler-vibe's `home/claude-mobile` when its image is reused.
+- **Several homes**: a different `CLAUDE_MOBILE_HOME` means separate Claude login, VS Code login, server cache and `.bashrc`. Choose it per config in the launch menu or with `--home`. The default is `~/.vibe-tunnel/home` (set `VT_DEFAULT_HOME` in `~/.vibe-tunnel/env` to put it on project storage), or euler-vibe's `home/claude-mobile` when its image is reused.
 - **Terminal use without VS Code**: `vibe-tunnel claude|shell [--config N | --workspace D ...]` runs the same container interactively on the current node; use it inside an interactive slurm job.
-- **Cleaning up**: `rm -rf ~/.vibe-tunnel/jobs/*` (settings of past submissions) and old logs are safe to delete any time.
+- **Cleaning up**: `rm -rf ~/.vibe-tunnel/jobs/*` (settings of past submissions) and old logs are safe to delete any time. Configs in `~/.vibe-tunnel/configs` and the sandbox home in `~/.vibe-tunnel/home` are the state you want to keep.
 
 ## 6. Extensions and settings live in the sandbox home
 

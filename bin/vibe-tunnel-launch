@@ -316,7 +316,7 @@ profile_line() {
 }
 label_line() {
     if [ "$MODE" != tunnel ]; then printf '%s(not used)%s' "$DIM" "$RST"; return; fi
-    if [ -n "$LABEL" ]; then printf '%s%s%s  %s→ vscode-remote://tunnel+%s/workspace%s' "$GREEN" "$LABEL" "$RST" "$DIM" "$LABEL" "$RST"
+    if [ -n "$LABEL" ]; then printf '%s%s%s  %s→ tunnel+%s, reused across jobs%s' "$GREEN" "$LABEL" "$RST" "$DIM" "$LABEL" "$RST"
     else printf '%s(none: vibe-<jobid>)%s' "$DIM" "$RST"; fi
 }
 
@@ -369,7 +369,7 @@ render_header() {
     printf '  %sMode%s       %s%s%s  %s%s%s%s\n' "$BOLD" "$RST" "$GREEN" "$MODE" "$RST" "$DIM" "$(mode_hint)" "$RST" "$EL"
     printf '%s\n' "$EL"
     printf '  %sWorkspace%s  %s%s%s%s\n' "$BOLD" "$RST" "$YELLOW" "$(tilde "$WORKSPACE")" "$RST" "$EL"
-    printf '             %s↳ /workspace in the container: VS Code opens here, Claude can read & edit%s%s\n' "$DIM" "$RST" "$EL"
+    printf '             %s↳ same path in the container: VS Code opens here, Claude can read & edit%s%s\n' "$DIM" "$RST" "$EL"
     printf '%s\n' "$EL"
     printf '  %sHome%s       %s%s%s%s\n' "$BOLD" "$RST" "$CYAN" "$(tilde "$CLAUDE_MOBILE_HOME")" "$RST" "$EL"
     printf '             %s↳ persistent /home: Claude + VS Code logins, extensions, shell config%s%s\n' "$DIM" "$RST" "$EL"
@@ -511,8 +511,7 @@ set_label() {
     local reply
     show_cursor
     read -e -r -p "$(printf '%sTunnel label%s (a-z, 0-9, -; max 20; empty = none): ' "$BOLD" "$RST")" reply || return
-    reply=$(printf '%s' "$reply" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed 's/^-*//; s/-*$//; s/--*/-/g')
-    LABEL=${reply:0:20}
+    LABEL=$(sanitize_name "$reply")
 }
 
 # --- saved configurations --------------------------------------------------
@@ -612,6 +611,8 @@ pick_config() {
         clr_down; pause; return 1
     fi
     LOADED_CONFIG=$name
+    # A config without a label gets a stable tunnel name from its own name.
+    [ -n "$LABEL" ] || LABEL=$(sanitize_name "$name")
     return 0
 }
 

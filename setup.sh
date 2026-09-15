@@ -185,7 +185,7 @@ mkdir -p "$STATE_DIR/profiles" "$STATE_DIR/logs" "$STATE_DIR/jobs"
     if [ "$IMAGE" != "$REPO/images/vibe-tunnel.sif" ]; then printf 'VT_IMAGE=%q\n' "$IMAGE"; else printf '# VT_IMAGE=%q\n' "$IMAGE"; fi
     if [ -n "$EULER_VIBE_DIR" ]; then printf 'EULER_VIBE_DIR=%q\n' "$EULER_VIBE_DIR"; else printf '# EULER_VIBE_DIR=/path/to/euler-vibe   # optional: reuse its image + sandbox home\n'; fi
     printf '# VT_CODE_CLI=%q\n' "$CLI"
-    printf '# VT_DEFAULT_HOME=%q\n' "$REPO/home/default"
+    printf '# VT_DEFAULT_HOME=%q   # per-user sandbox home (Claude + VS Code logins, extensions)\n' "$STATE_DIR/home"
 } > "$ENV_FILE"
 ok "wrote $ENV_FILE"
 say "  ${DIM}your own sbatch profiles go in $STATE_DIR/profiles/NAME.sbatch${RST}"

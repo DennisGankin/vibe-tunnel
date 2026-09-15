@@ -71,7 +71,7 @@ banner() {
     echo "================ vibe-tunnel ($VT_MODE) ================"
     echo "node       : $(hostname -s)${SLURM_JOB_ID:+  job $SLURM_JOB_ID}"
     echo "image      : $VT_IMAGE"
-    echo "workspace  : $WORKSPACE  -> /workspace"
+    echo "workspace  : $WORKSPACE  (same path in the container; also /workspace)"
     echo "home       : $CLAUDE_MOBILE_HOME  -> /home"
     echo "tmp        : $VT_TMPDIR  -> /tmp"
     for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do echo "bind (rw)  : $b"; done
@@ -89,6 +89,7 @@ banner
 echo "code cli   : $VT_CODE_CLI"
 echo "tunnel     : $TUNNEL_NAME"
 echo "VT_TUNNEL_NAME=$TUNNEL_NAME"
+echo "VT_WORKSPACE=$WORKSPACE"
 echo "================================================="
 
 # Forward SIGTERM (slurm time limit, scancel) into the container so the entry

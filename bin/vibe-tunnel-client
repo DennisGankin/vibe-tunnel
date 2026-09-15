@@ -89,9 +89,9 @@ open_url() {
     elif [ -n "${BROWSER:-}" ]; then "$BROWSER" "$1"
     else printf '  open in your browser: %s\n' "$1"; fi
 }
-open_tunnel() {  # open_tunnel NAME [LINK]
-    local name=$1 link=${2:-https://vscode.dev/tunnel/$1/workspace}
-    local uri="vscode-remote://tunnel+$name/workspace"
+open_tunnel() {  # open_tunnel NAME [LINK] [WORKSPACE]
+    local name=$1 ws=${3:-/workspace} link=${2:-https://vscode.dev/tunnel/$1$ws}
+    local uri="vscode-remote://tunnel+$name$ws"
     printf '\n  %stunnel%s   %s\n  %sdesktop%s  code --folder-uri %q\n  %sbrowser%s  %s\n\n' \
         "$BOLD" "$RST" "$name" "$BOLD" "$RST" "$uri" "$BOLD" "$RST" "$link"
     case "$VT_OPEN_WITH" in
@@ -114,9 +114,10 @@ open_tunnel() {  # open_tunnel NAME [LINK]
 
 # Stream the remote wait, react to its machine-readable lines, then open.
 wait_and_open() {
-    local id=$1 line tunnel= link= url= code=
+    local id=$1 line tunnel= link= url= code= ws=
     while IFS= read -r line; do
         case "$line" in
+            WORKSPACE=*)   ws=${line#WORKSPACE=} ;;
             DEVICE_URL=*)  url=${line#DEVICE_URL=} ;;
             DEVICE_CODE=*) code=${line#DEVICE_CODE=}
                            if copy_clipboard "$code"; then printf '  %s(code copied to clipboard)%s\n' "$DIM" "$RST"; fi
@@ -128,7 +129,7 @@ wait_and_open() {
         esac
     done < <(rvt wait "$id" 2>&1 || true)
     [ -n "$tunnel" ] || die "job $id ended before the tunnel came up (see: vibe-tunnel logs $id)"
-    open_tunnel "$tunnel" "$link"
+    open_tunnel "$tunnel" "$link" "$ws"
     printf '  %slater:  vibe-tunnel open %s      stop:  vibe-tunnel stop %s%s\n' "$DIM" "$id" "$id" "$RST"
 }
 
@@ -188,12 +189,12 @@ cmd_submit() {
 
 cmd_open() {
     local target=${1:-}; [ -n "$target" ] || die "open needs a JOBID or LABEL"
-    local rows id name state node el left tunnel link
+    local rows id name state node el left tunnel link ws
     rows=$(rvt status --porcelain)
-    while IFS='|' read -r id name state node el left tunnel link; do
+    while IFS='|' read -r id name state node el left tunnel link ws; do
         if [ "$id" = "$target" ] || [ "$name" = "vibe-tunnel-$target" ] || [ "$tunnel" = "$target" ]; then
             [ -n "$tunnel" ] || die "job $id has not reported its tunnel yet (vibe-tunnel wait $id)"
-            open_tunnel "$tunnel" "$link"; return
+            open_tunnel "$tunnel" "$link" "$ws"; return
         fi
     done <<< "$rows"
     die "no running tunnel matches '$target' (vibe-tunnel status)"
