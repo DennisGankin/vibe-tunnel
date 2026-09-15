@@ -59,8 +59,17 @@ save_cfg() {
 }
 
 # --- ssh ---------------------------------------------------------------------------
+# Platform: WSL and Git Bash/MSYS are supported laptop shells on Windows.
+case "$(uname -s 2>/dev/null)" in MINGW*|MSYS*|CYGWIN*) VT_PLATFORM=msys ;; *) VT_PLATFORM=unix ;; esac
+grep -qi microsoft /proc/version 2>/dev/null && VT_PLATFORM=wsl
+
+# One multiplexed ssh master per host: authenticate once, later calls are fast.
+# Git Bash's OpenSSH lacks reliable control sockets, so multiplexing is off there
+# (VT_SSH_MUX=0/1 overrides).
 SSH_CONTROL="$HOME/.ssh/vibe-tunnel-%C"
-SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$SSH_CONTROL" -o ControlPersist=15m -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
+SSH_OPTS=(-o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
+VT_SSH_MUX=${VT_SSH_MUX:-$([ "$VT_PLATFORM" = msys ] && echo 0 || echo 1)}
+[ "$VT_SSH_MUX" = 0 ] || SSH_OPTS+=(-o ControlMaster=auto -o "ControlPath=$SSH_CONTROL" -o ControlPersist=15m)
 remote_cmd() {  # remote_cmd ARGS... -> one shell string running the cluster CLI
     local s="NO_COLOR=${NO_COLOR:-} $(printf '%q' "$VT_REMOTE_DIR/bin/vibe-tunnel")" a
     for a in "$@"; do s+=" $(printf '%q' "$a")"; done
@@ -74,6 +83,7 @@ rsh()  { ssh "${SSH_OPTS[@]}" "$VT_HOST" "$@"; }                           # arb
 # hiccup; then every call through it stalls or fails. Check it first and drop it
 # if it is unhealthy, so the next call opens a fresh connection.
 reset_stale_master() {
+    [ "$VT_SSH_MUX" = 0 ] && return 0
     if ! ssh -O check -o "ControlPath=$SSH_CONTROL" "$VT_HOST" >/dev/null 2>&1; then
         ssh -O exit -o "ControlPath=$SSH_CONTROL" "$VT_HOST" >/dev/null 2>&1 || true
         # -O exit can leave the socket file behind when the master is already gone
@@ -98,12 +108,18 @@ connect() {
 # --- opening ---------------------------------------------------------------------------
 copy_clipboard() {
     if command -v pbcopy >/dev/null 2>&1; then printf '%s' "$1" | pbcopy
+    elif command -v clip.exe >/dev/null 2>&1; then printf '%s' "$1" | clip.exe        # WSL, Git Bash
     elif command -v xclip >/dev/null 2>&1; then printf '%s' "$1" | xclip -selection clipboard
     elif command -v wl-copy >/dev/null 2>&1; then printf '%s' "$1" | wl-copy
     else return 1; fi
 }
 open_url() {
-    if command -v open >/dev/null 2>&1; then open "$1"
+    if [ "$VT_PLATFORM" = msys ] || [ "$VT_PLATFORM" = wsl ]; then
+        if command -v wslview >/dev/null 2>&1; then wslview "$1"
+        elif command -v cmd.exe >/dev/null 2>&1; then cmd.exe /c start "" "$1" >/dev/null 2>&1
+        elif command -v powershell.exe >/dev/null 2>&1; then powershell.exe -NoProfile -Command "Start-Process '$1'" >/dev/null 2>&1
+        else printf '  open in your browser: %s\n' "$1"; fi
+    elif command -v open >/dev/null 2>&1; then open "$1"
     elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$1" >/dev/null 2>&1
     elif [ -n "${BROWSER:-}" ]; then "$BROWSER" "$1"
     else printf '  open in your browser: %s\n' "$1"; fi
@@ -117,13 +133,16 @@ open_tunnel() {  # open_tunnel NAME [LINK] [WORKSPACE]
         none) ;;
         browser) open_url "$link" ;;
         *)
-            if command -v code >/dev/null 2>&1; then
-                if ! code --list-extensions 2>/dev/null | grep -qi '^ms-vscode.remote-server$'; then
+            local code_cmd=
+            if command -v code >/dev/null 2>&1; then code_cmd=code
+            elif command -v code.cmd >/dev/null 2>&1; then code_cmd=code.cmd; fi
+            if [ -n "$code_cmd" ]; then
+                if ! "$code_cmd" --list-extensions 2>/dev/null | grep -qi '^ms-vscode.remote-server'; then
                     printf '  installing the "Remote - Tunnels" extension in VS Code…\n'
-                    code --install-extension ms-vscode.remote-server >/dev/null 2>&1 || warn "could not install ms-vscode.remote-server; install it from the Extensions view"
+                    "$code_cmd" --install-extension ms-vscode.remote-server >/dev/null 2>&1 || warn "could not install ms-vscode.remote-server; install it from the Extensions view"
                 fi
                 printf '  opening in VS Code…\n'
-                code --folder-uri "$uri"
+                "$code_cmd" --folder-uri "$uri"
             else
                 warn "'code' is not on PATH (VS Code: Shell Command: Install 'code' command). Opening the browser instead."
                 open_url "$link"

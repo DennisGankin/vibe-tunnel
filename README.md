@@ -156,9 +156,27 @@ The menu offers these as *mode* too (tunnel / claude / shell).
 | No Claude Code extension in the tunnel | Extensions live in the sandbox home, not your cluster home. Install it once from the Extensions view (choose the install button for the tunnel), or copy `~/.vscode-server/extensions` into `<sandbox home>/.vscode-server/` |
 | VS Code opens but the terminal starts in `/` | No folder open: File → Open Folder → your workspace path, or use the `code --folder-uri …` line that `vibe-tunnel wait` prints |
 | `claude` asks for login although you logged in before | Different sandbox home: each home has its own login. Check `Home` in the menu's Sandbox screen; the default is `~/.vibe-tunnel/home` |
-| Windows | The laptop client is bash + ssh + `code`: use WSL (or Git Bash). Not tested yet |
+| Windows | See [Windows](#windows) below |
 
 Logs: `vibe-tunnel logs <jobid>` (cluster or laptop), `vibe-tunnel status`, `vibe-tunnel doctor`.
+
+## Windows
+
+The laptop side is bash + ssh + the `code` command, so it runs in either of Windows' Unix-like shells. Nothing is
+installed on Windows itself beyond VS Code.
+
+**WSL (recommended).** In PowerShell once: `wsl --install` (Ubuntu), then inside WSL follow the member setup
+above exactly as on Linux: install `ssh` if missing (`sudo apt install openssh-client`), put your Euler alias and
+key into WSL's `~/.ssh/config`, clone, `./setup.sh --client`. Install the *WSL* extension in VS Code so the
+`code` command works inside WSL (VS Code on Windows stays the editor; the tunnel opens there). The device-code
+login page opens in your Windows browser and the code lands in the Windows clipboard.
+
+**Git Bash** (comes with Git for Windows) also works: same steps in a Git Bash window, `~/.ssh/config` lives in
+`C:\Users\<you>\.ssh`. ssh connection multiplexing is disabled there automatically, so each command
+authenticates again; use an ssh key with the agent (`eval $(ssh-agent); ssh-add`) to avoid retyping.
+
+Not supported: plain PowerShell/cmd (no bash). Status: implemented but not yet tested by a Windows user; please
+report what you see.
 
 ## Repository layout
 
