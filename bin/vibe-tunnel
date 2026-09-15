@@ -12,8 +12,9 @@ set -euo pipefail
 #                              [--rw DIR[:DEST]]... [--ro DIR[:DEST]]...
 #                              [--time T] [--cpus N] [--mem M] [--gpus G] [--partition P] [--account A]
 #                              [--extensions ID,ID] [--json]
-#   vibe-tunnel claude [sandbox opts] [-- CLAUDE_ARGS]   Claude Code in the container, right here
-#   vibe-tunnel shell  [sandbox opts]                    a shell in the container, right here
+#   vibe-tunnel claude [sandbox opts] [--srun [PROFILE]] [-- CLAUDE_ARGS]   Claude Code in the container
+#   vibe-tunnel shell  [sandbox opts] [--srun [PROFILE]]                    a shell in the container
+#                                       (right here, or with --srun inside an interactive slurm job)
 #   vibe-tunnel wait JOBID                block until the tunnel link appears, print it
 #   vibe-tunnel status [--porcelain]      running tunnels + their links
 #   vibe-tunnel show JOBID                state, node and the full log (machine-readable)
@@ -57,7 +58,7 @@ ok()   { printf '  %s✓%s %s\n' "$GREEN" "$RST" "$*"; }
 warn() { printf '  %s!%s %s\n' "$YELLOW" "$RST" "$*"; }
 die()  { printf '%svibe-tunnel: %s%s\n' "$RED" "$*" "$RST" >&2; exit 1; }
 
-usage() { sed -n '4,34p' "$VT_BIN" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,35p' "$VT_BIN" | sed 's/^# \{0,1\}//'; }
 
 # --- helpers ---------------------------------------------------------------
 
@@ -232,10 +233,33 @@ cmd_submit() {
 # --- claude / shell: run the container interactively, here ------------------
 cmd_run() {
     local mode=$1; shift
-    parse_sandbox_opts "$@"
+    # --srun [PROFILE]: run inside an interactive slurm job with the profile's resources
+    # (from the flag, the config, or the first preset) instead of on this node.
+    local use_srun=0 pass=() a
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --srun) use_srun=1; if [ -n "${2:-}" ] && [ "${2#-}" = "$2" ] && resolve_profile "$2" >/dev/null 2>&1; then pass+=("$2"); shift; fi ;;
+            *) pass+=("$1") ;;
+        esac; shift
+    done
+    parse_sandbox_opts "${pass[@]+"${pass[@]}"}"
+    if [ "$use_srun" -eq 1 ] && [ -z "${SLURM_JOB_ID:-}" ]; then
+        local profile=$OPT_PROFILE k v pp
+        [ -n "$profile" ] || [ -z "$OPT_CF" ] || profile=$(config_field "$OPT_CF" PROFILE)
+        [ -n "$profile" ] || profile=$(cmd_profiles --porcelain | head -n1 | cut -d'|' -f1)
+        pp=$(resolve_profile "$profile") || die "profile not found: $profile"
+        if [ -n "$OPT_CF" ]; then for k in "${RESOURCE_KEYS[@]}"; do eval "v=\${R_$k:-}"; [ -n "$v" ] || eval "R_$k=\$(config_field \"\$OPT_CF\" $k)"; done; fi
+        local flags=() line
+        while IFS= read -r line; do k=${line%%=*}; eval "v=\${R_$k:-}"; [ -n "$v" ] || flags+=("$(resource_flag "$k")=${line#*=}"); done < <(profile_defaults "$pp")
+        for k in "${RESOURCE_KEYS[@]}"; do eval "v=\${R_$k:-}"; [ -z "$v" ] || flags+=("$(resource_flag "$k")=$v"); done
+        command -v srun >/dev/null 2>&1 || die "srun not found"
+        printf '%sstarting an interactive job (%s) for vibe-tunnel %s…%s\n' "$DIM" "$(resources_summary "$pp")" "$mode" "$RST" >&2
+        # drop --srun (and its profile) from the args the inner invocation sees
+        exec srun --job-name="vibe-tunnel-$mode" "${flags[@]+"${flags[@]}"}" --pty "$VT_BIN" "$mode" "${pass[@]+"${pass[@]}"}"
+    fi
     local env_file
     env_file=$(write_env_file "")
-    [ -n "${SLURM_JOB_ID:-}" ] || warn "not inside a slurm job: this runs on $(hostname -s). For real work use an interactive job (srun ... --pty bash) first."
+    [ -n "${SLURM_JOB_ID:-}" ] || warn "not inside a slurm job: this runs on $(hostname -s). Add --srun [PROFILE] to run it in an interactive job."
     VT_ENV_FILE=$env_file VT_MODE=$mode exec "$VIBE_TUNNEL_DIR/bin/vibe-tunnel-job" "${OPT_REST[@]+"${OPT_REST[@]}"}"
 }
 
