@@ -2,6 +2,34 @@
 
 VS Code + Claude Code **inside a sandboxed container** on an Euler compute node, opened from your laptop with one command. Standalone: one repo, one `vibe-tunnel` command on the laptop and on the cluster.
 
+## Setup for lab members: one command
+
+The Beltrao lab has a shared installation on Euler at `/cluster/project/beltrao/software/vibe-tunnel`
+(scripts, built image, VS Code CLI). You never build anything. You need: VS Code desktop with the `code`
+command ([how](https://code.visualstudio.com/docs/setup/mac#_launching-from-the-command-line)), a working
+`ssh euler` (alias in `~/.ssh/config`), and a Unix shell (macOS, Linux, or WSL on Windows).
+
+```bash
+# on your laptop: VS Code with the `code` command + a working `ssh euler`, then
+git clone https://github.com/DennisGankin/vibe-tunnel.git ~/vibe-tunnel && cd ~/vibe-tunnel && ./setup.sh --client
+```
+Answer with your ssh alias (`euler`) and the installation path `/cluster/project/beltrao/software/vibe-tunnel`.
+The client then runs that installation's `setup.sh` on the cluster for you, which writes only your private
+`~/.vibe-tunnel` and adds `bin/` to your PATH there. Then, in a new shell:
+
+```bash
+vibe-tunnel
+```
+Three one-time logins on the first tunnel, all stored in your private sandbox home: the VS Code tunnel (GitHub
+device code, handled by the launcher), Claude inside the container (`claude` in a VS Code terminal), and
+installing the Claude Code extension in the tunnel.
+
+Your configs, profiles, logs and sandbox home live in `~/.vibe-tunnel` (mode 700); nothing you do touches the
+shared directory. Problems? See [Troubleshooting](#troubleshooting). Other groups: see the maintainer guide in
+[docs/CLUSTER_SETUP.md](docs/CLUSTER_SETUP.md) to create such an installation.
+
+## What it is
+
 It grew out of two things the lab used before and replaces both:
 
 - [`codeserver_tunnel`](../codeserver_tunnel.py): submit a slurm job, run `code tunnel` on the node, open the link locally.
@@ -35,32 +63,13 @@ The VS Code CLI is not baked into the image: it is a static binary that gets bin
 - **Resources are editable in the menu.** Profiles (`profiles/*.sbatch`) are presets; the *Resources* entry shows time, CPUs, memory per CPU, GPUs, partition and account, lets you change any of them, and saves the values with the config. Overrides are passed to `sbatch` as flags and beat the profile's `#SBATCH` lines. `vibe-tunnel profiles edit|new NAME` edits or creates a preset (your copies live in `~/.vibe-tunnel/profiles/` and shadow the repo's).
 - **One command, both places.** `vibe-tunnel` is bash: on the cluster it is the CLI, on the laptop (no slurm) it drives the cluster copy over ssh. No Python, no environment.
 
-## New lab member? One command
-
-If your group runs a shared installation on the cluster (one directory with the scripts, the built image and the
-VS Code CLI, maintained by one person), you never build anything:
-
-```bash
-# on your laptop: VS Code with the `code` command + a working `ssh euler`, then
-git clone <this repo> ~/vibe-tunnel && cd ~/vibe-tunnel && ./setup.sh --client
-```
-Answer with your ssh alias and the shared installation's path (e.g. `/cluster/project/<group>/software/vibe-tunnel`).
-The client then runs that installation's `setup.sh` on the cluster for you, which writes only your private
-`~/.vibe-tunnel` and adds `bin/` to your PATH there. Then run `vibe-tunnel`.
-Three one-time logins on the first tunnel, all stored in your private sandbox home: the VS Code tunnel (GitHub
-device code, handled by the launcher), Claude inside the container (`claude` in a VS Code terminal), and
-installing the Claude Code extension in the tunnel.
-
-Your configs, profiles, logs and sandbox home live in `~/.vibe-tunnel` (mode 700); nothing you do touches the
-shared directory. Windows: use WSL for the laptop side.
-
-## Quick start (own installation)
+## Quick start (own installation, other groups)
 
 ### Once, on the cluster
 See [docs/CLUSTER_SETUP.md](docs/CLUSTER_SETUP.md) for details and the verification checklist.
 
 ```bash
-git clone <this repo> ~/vibe-tunnel
+git clone https://github.com/DennisGankin/vibe-tunnel.git ~/vibe-tunnel
 cd ~/vibe-tunnel && module load eth_proxy && ./setup.sh   # builds images/vibe-tunnel.sif, downloads the VS Code CLI, writes ~/.vibe-tunnel/env
 vibe-tunnel doctor
 ```
@@ -68,7 +77,7 @@ Already running euler-vibe? `./setup.sh --euler-vibe /path/to/euler-vibe` skips 
 
 ### Once, on your laptop
 ```bash
-git clone <this repo> ~/vibe-tunnel
+git clone https://github.com/DennisGankin/vibe-tunnel.git ~/vibe-tunnel
 cd ~/vibe-tunnel && ./setup.sh --client      # asks for the ssh host, the cluster path of the repo, how to open tunnels
 ```
 Needs a working `ssh euler` (alias in `~/.ssh/config`) and VS Code desktop with the `code` command on PATH. The
@@ -134,6 +143,22 @@ The menu offers these as *mode* too (tunnel / claude / shell).
 - `git`/`ssh` config from your cluster `$HOME` is *not* visible (that is the point of the sandbox). Put a `.gitconfig` into the sandbox home, or add `--ro ~/.ssh` if you need to push over ssh.
 - Extensions and VS Code settings live in `/home/.vscode-server` of the **sandbox** home, not your cluster `$HOME`, so a new sandbox home starts without them. Copy them over once or install from the Extensions view; see docs/CLUSTER_SETUP.md section 6. The `--extensions` preinstall did not work with CLI 1.125.1.
 - The image (`images/vibe-tunnel.def`): Ubuntu 24.04, Node 24, Claude Code, uv, Python 3 with build tools, git, ripgrep. GPU access via `--nv`.
+
+## Troubleshooting
+
+| Symptom | Cause / fix |
+|---|---|
+| `vibe-tunnel` on the laptop hangs, or `ssh euler failed` although plain `ssh euler` works | A half-dead multiplexed ssh connection after a VPN/network hiccup. The client resets it automatically since v0.3; by hand: `ssh -O exit -o ControlPath=~/.ssh/vibe-tunnel-%C euler` |
+| Menu keys react slowly | Usually the same stale ssh connection (above). If `squeue -u $USER` itself takes seconds on Euler, slurm is slow; the menu waits for it when drawing the home screen |
+| "Uh oh, we couldn't find anything" on GitHub's device page | An already-used login code was shown (fixed for reopen). A fresh job that really needs a login prints a new code in `vibe-tunnel logs <jobid>` |
+| Asked to log in to VS Code on every job | The saved token is not being reused: look for `reusing saved VS Code login` in the job log and for `token.json` in `<sandbox home>/.vscode-cli/` |
+| Job ends before the link appears | `vibe-tunnel logs <jobid>`: a missing workspace directory, a wrong account/partition (`sbatch` error), or the container image missing |
+| No Claude Code extension in the tunnel | Extensions live in the sandbox home, not your cluster home. Install it once from the Extensions view (choose the install button for the tunnel), or copy `~/.vscode-server/extensions` into `<sandbox home>/.vscode-server/` |
+| VS Code opens but the terminal starts in `/` | No folder open: File → Open Folder → your workspace path, or use the `code --folder-uri …` line that `vibe-tunnel wait` prints |
+| `claude` asks for login although you logged in before | Different sandbox home: each home has its own login. Check `Home` in the menu's Sandbox screen; the default is `~/.vibe-tunnel/home` |
+| Windows | The laptop client is bash + ssh + `code`: use WSL (or Git Bash). Not tested yet |
+
+Logs: `vibe-tunnel logs <jobid>` (cluster or laptop), `vibe-tunnel status`, `vibe-tunnel doctor`.
 
 ## Repository layout
 
