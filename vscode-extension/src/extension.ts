@@ -222,10 +222,12 @@ async function waitAndOpen(jobId: string, title: string): Promise<void> {
         const ev = parser.feed(line); if (!ev) { return; }
         if (ev.kind === 'text') { progress.report({ message: ev.text }); output.appendLine(ev.text!); }
         if (ev.kind === 'device') {
+          const url = ev.url || 'https://github.com/login/device';
           void vscode.env.clipboard.writeText(ev.code!);
-          void vscode.window.showInformationMessage(`VS Code tunnel login (once per sandbox home): enter code ${ev.code} on GitHub. It is in your clipboard.`, 'Open GitHub')
-            .then(pick => { if (pick) { void vscode.env.openExternal(vscode.Uri.parse(ev.url || 'https://github.com/login/device')); } });
-          progress.report({ message: `waiting for the GitHub login (code ${ev.code})…` });
+          void vscode.env.openExternal(vscode.Uri.parse(url));
+          void vscode.window.showInformationMessage(`One-time VS Code tunnel login: paste code ${ev.code} on the GitHub page that just opened (the code is in your clipboard).`, 'Open GitHub again')
+            .then(pick => { if (pick) { void vscode.env.openExternal(vscode.Uri.parse(url)); } });
+          progress.report({ message: `enter code ${ev.code} on GitHub (page opened, code copied)…` });
         }
         if (ev.kind === 'ready') { ready = { tunnel: ev.tunnel!, workspace: ev.workspace!, link: ev.link! }; }
       }, ac.signal);
