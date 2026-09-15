@@ -29,6 +29,12 @@ VT_BIN=$(realpath "$0")
 VIBE_TUNNEL_DIR=$(dirname "$(dirname "$VT_BIN")")
 export VIBE_TUNNEL_DIR
 
+# Laptop client mode: no slurm here, so drive the cluster copy over ssh instead
+# (bin/vibe-tunnel-client). VT_ON_CLUSTER=1 forces cluster mode.
+if [ -z "${VT_ON_CLUSTER:-}" ] && ! command -v sbatch >/dev/null 2>&1; then
+    exec "$VIBE_TUNNEL_DIR/bin/vibe-tunnel-client" "$@"
+fi
+
 VT_STATE_DIR=${VT_STATE_DIR:-$HOME/.vibe-tunnel}
 VT_LOG_DIR=$VT_STATE_DIR/logs
 VT_JOB_DIR=$VT_STATE_DIR/jobs
