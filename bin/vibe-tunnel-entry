@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# vibe-tunnel-entry -----------------------------------------------------------
+# Runs INSIDE the euler-vibe container (claude-mobile.sif). Prepares the
+# persistent sandbox home so VS Code terminals and the Claude Code extension
+# find a working, self-updating `claude`, then runs `code tunnel` here so the
+# VS Code server (and everything it spawns) lives inside the sandbox.
+#
+# Bound in by vibe-tunnel-job:
+#   /opt/vibe-tunnel/code     static VS Code CLI (alpine build)
+#   /opt/vibe-tunnel/shellrc  euler-vibe's claude-mobile-shellrc (optional)
+#   /home                     persistent sandbox home, /workspace, /tmp (per job)
+# Environment: VT_TUNNEL_NAME VT_JOB_ID VT_EXTENSIONS VT_HOST_WORKSPACE VT_HOST_NODE
+
+log() { printf '[%s] vibe-tunnel: %s\n' "$(date '+%H:%M:%S')" "$*"; }
+
+export HOME=/home
+cd /workspace 2>/dev/null || cd /
+export PATH="$HOME/.local/bin:$PATH"
+TUNNEL_NAME=${VT_TUNNEL_NAME:-vibe-${VT_JOB_ID:-$$}}
+
+# --- 1. shell setup for VS Code terminals ------------------------------------
+# claude-mobile starts bash with --rcfile; VS Code's integrated terminal starts a
+# plain interactive bash, which reads ~/.bashrc. Source euler-vibe's shellrc from
+# there (guarded, so the same home still works when the bind is absent).
+BEGIN='# >>> vibe-tunnel >>>'; END='# <<< vibe-tunnel <<<'
+if ! grep -qsF "$BEGIN" "$HOME/.bashrc"; then
+    {
+        printf '\n%s\n' "$BEGIN"
+        printf '# Added by vibe-tunnel: euler-vibe shell helpers (claude on PATH, self-update bootstrap).\n'
+        printf '[ -f /opt/vibe-tunnel/shellrc ] && . /opt/vibe-tunnel/shellrc\n'
+        printf 'export PATH="$HOME/.local/bin:$PATH"\n'
+        printf '%s\n' "$END"
+    } >> "$HOME/.bashrc"
+    log "added shell block to ~/.bashrc"
+fi
+[ -f "$HOME/.bash_profile" ] || printf '[ -f ~/.bashrc ] && . ~/.bashrc\n' > "$HOME/.bash_profile"
+
+# --- 2. claude: persistent, self-updatable native build ----------------------
+# Same idea as claude-mobile-shellrc: the npm build baked into the image sits in
+# read-only /usr and cannot update itself; a native build under ~/.local can.
+if [ ! -x "$HOME/.local/bin/claude" ] && command -v claude >/dev/null 2>&1; then
+    log "installing self-updatable claude to ~/.local (one-time)"
+    command claude install latest || log "claude install failed; the bundled build will be used"
+    hash -r
+fi
+log "claude: $(command -v claude 2>/dev/null || echo not-found) $(claude --version 2>/dev/null | head -n1)"
+
+# --- 3. VS Code CLI ------------------------------------------------------------
+# Work from a writable per-job copy so the CLI's own self-update can succeed
+# instead of failing on the read-only bind.
+mkdir -p /tmp/vibe-tunnel
+CODE=/tmp/vibe-tunnel/code
+install -m 755 /opt/vibe-tunnel/code "$CODE" || { log "ERROR: cannot copy the VS Code CLI"; exit 1; }
+log "vscode cli: $("$CODE" --version 2>/dev/null | head -n1)"
+
+# Per-job CLI data dir (the tunnel holds a singleton lock there, so concurrent
+# tunnels from the same home need their own), but a shared login token so a
+# device-code login is only needed once per sandbox home.
+# VSCODE_CLI_USE_FILE_KEYCHAIN makes the CLI store the token as a file in the
+# data dir instead of trying a system keyring that does not exist here.
+export VSCODE_CLI_USE_FILE_KEYCHAIN=1
+CLI_ROOT=$HOME/.vscode-cli
+CLI_DATA_DIR=$CLI_ROOT/jobs/${VT_JOB_ID:-$$}
+SHARED_TOKEN=$CLI_ROOT/token.json
+SERVER_DATA_DIR=$HOME/.vscode-server
+mkdir -p "$CLI_DATA_DIR" "$SERVER_DATA_DIR"
+[ -f "$SHARED_TOKEN" ] && cp -f "$SHARED_TOKEN" "$CLI_DATA_DIR/token.json" && log "reusing saved VS Code login"
+
+sync_token() {  # persist a fresh login for the next job
+    if [ -f "$CLI_DATA_DIR/token.json" ] && ! cmp -s "$CLI_DATA_DIR/token.json" "$SHARED_TOKEN" 2>/dev/null; then
+        cp -f "$CLI_DATA_DIR/token.json" "$SHARED_TOKEN" && log "saved VS Code login for future jobs"
+    fi
+}
+
+# Drop old per-job dirs (keep this job's) so the home does not fill up.
+find "$CLI_ROOT/jobs" -mindepth 1 -maxdepth 1 -type d ! -name "${VT_JOB_ID:-$$}" -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+
+# --- 4. tunnel flags -------------------------------------------------------------
+TUNNEL_ARGS=(
+    tunnel
+    --accept-server-license-terms
+    --name "$TUNNEL_NAME"
+    --cli-data-dir "$CLI_DATA_DIR"
+    --server-data-dir "$SERVER_DATA_DIR"
+)
+# Pre-install extensions (Claude Code by default) on the server if this CLI
+# version supports it; otherwise install them from the VS Code UI once.
+if [ -n "${VT_EXTENSIONS:-}" ]; then
+    if "$CODE" tunnel --help 2>&1 | grep -q -- '--install-extension'; then
+        IFS=',' read -ra exts <<< "$VT_EXTENSIONS"
+        for e in "${exts[@]}"; do [ -n "$e" ] && TUNNEL_ARGS+=(--install-extension "$e"); done
+    else
+        log "this VS Code CLI has no --install-extension; install '$VT_EXTENSIONS' from the Extensions view"
+    fi
+fi
+
+# --- 5. run -----------------------------------------------------------------------
+echo "------------------------------------------------------------"
+echo "sandbox    : /workspace = ${VT_HOST_WORKSPACE:-?} on ${VT_HOST_NODE:-?}"
+echo "tunnel     : $TUNNEL_NAME"
+echo "desktop    : code --folder-uri 'vscode-remote://tunnel+$TUNNEL_NAME/workspace'"
+echo "browser    : https://vscode.dev/tunnel/$TUNNEL_NAME/workspace"
+echo "------------------------------------------------------------"
+
+tunnel_pid= terminated=0
+cleanup() {
+    trap - TERM INT EXIT
+    terminated=1
+    sync_token
+    if [ -n "$tunnel_pid" ] && kill -0 "$tunnel_pid" 2>/dev/null; then
+        log "stopping tunnel"
+        kill -TERM "$tunnel_pid" 2>/dev/null; wait "$tunnel_pid" 2>/dev/null
+    fi
+    # Free the name for the next job (accounts are limited to a handful of tunnels).
+    timeout 30 "$CODE" tunnel --cli-data-dir "$CLI_DATA_DIR" unregister >/dev/null 2>&1 \
+        && log "tunnel '$TUNNEL_NAME' unregistered" || log "tunnel unregister skipped/failed"
+}
+trap cleanup TERM INT EXIT
+
+# `code tunnel` prints either a device-login prompt (first time per home) or
+# "Open this link in your browser ..." once the tunnel is up; the launcher
+# watches the log for both. --no-sleep is not needed: the job has no idle timer.
+"$CODE" "${TUNNEL_ARGS[@]}" &
+tunnel_pid=$!
+
+# Persist the token as soon as the first login completes, then periodically.
+( while kill -0 "$tunnel_pid" 2>/dev/null; do sleep 30; sync_token; done ) &
+sync_pid=$!
+
+wait "$tunnel_pid"; status=$?
+{ kill "$sync_pid" 2>/dev/null && wait "$sync_pid"; } 2>/dev/null || true
+log "code tunnel exited with status $status"
+# A shutdown we were asked for (scancel, time limit) is a clean end of the job.
+[ "$terminated" -eq 1 ] && exit 0
+exit "$status"

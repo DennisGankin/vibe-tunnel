@@ -1,0 +1,9 @@
+# Downloaded VS Code CLI binary (setup.sh puts it here on the cluster)
+cli/code
+cli/*.tar.gz
+
+# Local launcher config with your hostname/paths
+vibe_tunnel.cfg
+
+__pycache__/
+.DS_Store

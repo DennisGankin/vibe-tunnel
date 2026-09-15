@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# vibe-tunnel ---------------------------------------------------------------
+# Cluster-side CLI. Submits a slurm job that starts euler-vibe's sandboxed
+# Claude container on a compute node and runs a VS Code tunnel *inside* it,
+# so VS Code (desktop or vscode.dev) attaches straight into the sandbox.
+#
+#   vibe-tunnel submit PROFILE [--name LABEL] [--config CLAUDE_LAUNCH_CONFIG]
+#                              [--workspace DIR] [--home DIR]
+#                              [--rw DIR[:DEST]]... [--ro DIR[:DEST]]...
+#                              [--extensions ID,ID] [--json]
+#   vibe-tunnel status [--porcelain]      running tunnels + their links
+#   vibe-tunnel show JOBID                state, node and the full log (machine-readable)
+#   vibe-tunnel logs JOBID [-f]           tail the job log
+#   vibe-tunnel stop JOBID|LABEL          scancel
+#   vibe-tunnel configs [--porcelain]     saved claude-launch sandbox configs
+#   vibe-tunnel profiles [--porcelain]    available sbatch resource profiles
+#   vibe-tunnel doctor                    check image, CLI, proxy, dirs
+#
+# The laptop launcher (vibe_tunnel.py) only calls these subcommands over ssh.
+
+VT_BIN=$(realpath "$0")
+VIBE_TUNNEL_DIR=$(dirname "$(dirname "$VT_BIN")")
+export VIBE_TUNNEL_DIR
+
+VT_STATE_DIR=${VT_STATE_DIR:-$HOME/.vibe-tunnel}
+VT_LOG_DIR=$VT_STATE_DIR/logs
+VT_JOB_DIR=$VT_STATE_DIR/jobs
+VT_USER_PROFILES=$VT_STATE_DIR/profiles
+VT_ENV=$VT_STATE_DIR/env
+JOB_PREFIX=vibe-tunnel
+
+# Site settings written by setup.sh (EULER_VIBE_DIR, CLAUDE_MOBILE_IMAGE, VT_CODE_CLI ...).
+# shellcheck disable=SC1090
+[ -f "$VT_ENV" ] && . "$VT_ENV"
+
+EULER_VIBE_DIR=${EULER_VIBE_DIR:-$(dirname "$VIBE_TUNNEL_DIR")/euler-vibe}
+[ -d "$EULER_VIBE_DIR" ] || EULER_VIBE_DIR=$HOME/euler-vibe
+CLAUDE_MOBILE_IMAGE=${CLAUDE_MOBILE_IMAGE:-$EULER_VIBE_DIR/images/claude-mobile.sif}
+CLAUDE_LAUNCH_CONFIG_DIR=${CLAUDE_LAUNCH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-launch/configs}
+VT_CODE_CLI=${VT_CODE_CLI:-$VIBE_TUNNEL_DIR/cli/code}
+[ -x "$VT_CODE_CLI" ] || { [ -x "$HOME/code" ] && VT_CODE_CLI=$HOME/code; } || true
+export EULER_VIBE_DIR CLAUDE_MOBILE_IMAGE CLAUDE_LAUNCH_CONFIG_DIR VT_CODE_CLI
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    BOLD=$'\033[1m'; DIM=$'\033[2m'; RST=$'\033[0m'
+    GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; CYAN=$'\033[36m'
+else
+    BOLD= DIM= RST= GREEN= YELLOW= RED= CYAN=
+fi
+ok()   { printf '  %s✓%s %s\n' "$GREEN" "$RST" "$*"; }
+warn() { printf '  %s!%s %s\n' "$YELLOW" "$RST" "$*"; }
+die()  { printf '%svibe-tunnel: %s%s\n' "$RED" "$*" "$RST" >&2; exit 1; }
+
+usage() { sed -n '4,22p' "$VT_BIN" | sed 's/^# \{0,1\}//'; }
+
+# --- helpers ---------------------------------------------------------------
+
+# Absolute path that need not exist yet (GNU realpath -m, with a portable fallback).
+abspath() {
+    realpath -m -- "$1" 2>/dev/null && return
+    case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$(pwd)" "$1" ;; esac
+}
+
+# Tunnel names: VS Code allows lowercase letters, digits and hyphens, max 20 chars.
+sanitize_name() {
+    local n
+    n=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed 's/^-*//; s/-*$//; s/--*/-/g')
+    printf '%s' "${n:0:20}"
+}
+
+resolve_profile() {
+    local p=$1
+    if [ -f "$p" ]; then realpath "$p"; return; fi
+    for d in "$VT_USER_PROFILES" "$VIBE_TUNNEL_DIR/profiles"; do
+        [ -f "$d/$p.sbatch" ] && { printf '%s' "$d/$p.sbatch"; return; }
+        [ -f "$d/$p" ] && { printf '%s' "$d/$p"; return; }
+    done
+    return 1
+}
+
+# One-line summary of a profile's resources for menus.
+profile_summary() {
+    awk '
+        /^#SBATCH/ {
+            for (i = 2; i <= NF; i++) {
+                if ($i ~ /^--(time|cpus-per-task|mem|mem-per-cpu|gpus|gres|partition)=/) {
+                    sub(/^--/, "", $i); printf "%s ", $i
+                }
+            }
+        }
+    ' "$1" | sed 's/ $//'
+}
+
+config_is_valid() {
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|'#'*) ;;
+            WORKSPACE=*|MODE=*|CLAUDE_MOBILE_HOME=*|'RW_BINDS=('*|'RO_BINDS=('*) ;;
+            *) return 1 ;;
+        esac
+    done < "$1"
+}
+
+config_field() {  # config_field FILE VAR
+    ( set +eu; . "$1" >/dev/null 2>&1; printf '%s' "${!2:-}" )
+}
+
+# All of the user's vibe-tunnel jobs: id|name|state|node|elapsed|timeleft
+squeue_jobs() {
+    { squeue -u "$USER" -h -o '%i|%j|%T|%N|%M|%L' 2>/dev/null | awk -F'|' -v p="$JOB_PREFIX" 'index($2, p) == 1'; } || true
+}
+
+# Extract what the launcher needs from a job log. Always succeed: a missing log
+# or no match yet (job still pending) is normal and must not trip set -e/pipefail.
+log_link()   { { grep -Eo 'Open this link in your browser[[:space:]]+https?://[^[:space:]]+' "$1" 2>/dev/null | tail -n1 | awk '{print $NF}'; } || true; }
+log_tunnel() { { grep -Eo '^VT_TUNNEL_NAME=.*' "$1" 2>/dev/null | tail -n1 | cut -d= -f2; } || true; }
+log_device() { { grep -Eo 'log into[[:space:]]+https?://[^[:space:]]+[[:space:]]+and use code[[:space:]]+[A-Za-z0-9-]+' "$1" 2>/dev/null | tail -n1 | awk '{print $3 " " $NF}'; } || true; }
+
+# --- submit -----------------------------------------------------------------
+cmd_submit() {
+    local profile= label= config= workspace= home_dir= json=0
+    local extensions=${VT_EXTENSIONS-anthropic.claude-code}
+    local rw=() ro=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --name)       label=$2; shift ;;
+            --config)     config=$2; shift ;;
+            --workspace)  workspace=$2; shift ;;
+            --home)       home_dir=$2; shift ;;
+            --rw)         rw+=("$2"); shift ;;
+            --ro)         ro+=("$2"); shift ;;
+            --extensions) extensions=$2; shift ;;
+            --json)       json=1 ;;
+            -h|--help)    usage; exit 0 ;;
+            -*)           die "unknown option: $1" ;;
+            *)            [ -z "$profile" ] || die "unexpected argument: $1"; profile=$1 ;;
+        esac
+        shift
+    done
+    [ -n "$profile" ] || die "submit needs a PROFILE (see: vibe-tunnel profiles)"
+    local profile_path
+    profile_path=$(resolve_profile "$profile") || die "profile not found: $profile"
+
+    [ -e "$CLAUDE_MOBILE_IMAGE" ] || die "container image missing: $CLAUDE_MOBILE_IMAGE (build euler-vibe first, see docs/CLUSTER_SETUP.md)"
+    [ -x "$VT_CODE_CLI" ] || die "VS Code CLI missing: $VT_CODE_CLI (run ./setup.sh)"
+
+    if [ -n "$config" ]; then
+        local cf=$CLAUDE_LAUNCH_CONFIG_DIR/$config.conf
+        [ -f "$cf" ] || die "claude-launch config not found: $cf"
+        config_is_valid "$cf" || die "config has unexpected content, refusing to use it: $cf"
+    fi
+    if [ -n "$workspace" ]; then
+        [ -d "$workspace" ] || die "workspace is not a directory: $workspace"
+        workspace=$(realpath -- "$workspace")
+    fi
+    [ -z "$home_dir" ] || home_dir=$(abspath "$home_dir")
+
+    local tunnel_name= job_name=$JOB_PREFIX
+    if [ -n "$label" ]; then
+        tunnel_name=$(sanitize_name "$label")
+        [ -n "$tunnel_name" ] || die "label '$label' has no usable characters (a-z, 0-9, -)"
+        job_name="$JOB_PREFIX-$tunnel_name"
+        # Refuse a second tunnel with the same name: VS Code would reject the
+        # duplicate registration and the launcher could not tell them apart.
+        if squeue_jobs | awk -F'|' -v n="$job_name" '$2 == n {found=1} END {exit !found}'; then
+            die "a tunnel job named '$job_name' is already queued/running (vibe-tunnel status)"
+        fi
+    fi
+
+    mkdir -p "$VT_LOG_DIR" "$VT_JOB_DIR" "$VT_USER_PROFILES"
+    local stamp env_file b
+    stamp=$(date +%Y%m%d-%H%M%S)-$$
+    env_file=$VT_JOB_DIR/$stamp.env
+    {
+        printf '# vibe-tunnel job settings, written %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+        printf 'VT_TUNNEL_NAME=%q\n' "$tunnel_name"
+        printf 'VT_CONFIG=%q\n' "$config"
+        printf 'VT_WORKSPACE=%q\n' "$workspace"
+        printf 'VT_HOME=%q\n' "$home_dir"
+        printf 'VT_EXTENSIONS=%q\n' "$extensions"
+        printf 'VT_RW_BINDS=('; for b in "${rw[@]+"${rw[@]}"}"; do printf ' %q' "$b"; done; printf ' )\n'
+        printf 'VT_RO_BINDS=('; for b in "${ro[@]+"${ro[@]}"}"; do printf ' %q' "$b"; done; printf ' )\n'
+    } > "$env_file"
+
+    # --export must keep ALL, otherwise sbatch stops exporting the rest of the
+    # submission environment (modules, proxy, ...). Values contain no commas.
+    local out job_id
+    out=$(sbatch --parsable \
+        --job-name="$job_name" \
+        --output="$VT_LOG_DIR/%j.log" \
+        --export="ALL,VIBE_TUNNEL_DIR=$VIBE_TUNNEL_DIR,VT_ENV_FILE=$env_file,VT_STATE_DIR=$VT_STATE_DIR" \
+        "$profile_path") || die "sbatch failed"
+    job_id=${out%%;*}
+    [ -n "$job_id" ] || die "could not read the job id from sbatch output: $out"
+
+    if [ "$json" -eq 1 ]; then
+        printf '{"job_id":"%s","job_name":"%s","tunnel_name":"%s","log":"%s","profile":"%s","config":"%s"}\n' \
+            "$job_id" "$job_name" "$tunnel_name" "$VT_LOG_DIR/$job_id.log" "$profile_path" "$config"
+    else
+        printf 'Submitted job %s%s%s (%s)\n' "$BOLD" "$job_id" "$RST" "$job_name"
+        printf '  profile : %s\n' "$profile_path"
+        [ -z "$config" ]    || printf '  config  : %s\n' "$config"
+        [ -z "$workspace" ] || printf '  workspace: %s\n' "$workspace"
+        printf '  log     : %s\n' "$VT_LOG_DIR/$job_id.log"
+        printf '\nFollow it with:  %svibe-tunnel logs %s -f%s\n' "$CYAN" "$job_id" "$RST"
+    fi
+}
+
+# --- status / show / logs / stop -------------------------------------------
+cmd_status() {
+    local porcelain=0
+    [ "${1:-}" = "--porcelain" ] && porcelain=1
+    local rows
+    rows=$(squeue_jobs || true)
+    if [ -z "$rows" ]; then
+        [ "$porcelain" -eq 1 ] || echo "No vibe-tunnel jobs queued or running."
+        return 0
+    fi
+    [ "$porcelain" -eq 1 ] || printf '%s%-10s %-28s %-9s %-10s %-9s %-9s %s%s\n' "$BOLD" JOBID NAME STATE NODE ELAPSED LEFT TUNNEL "$RST"
+    local id name state node elapsed left log tunnel link
+    while IFS='|' read -r id name state node elapsed left; do
+        log=$VT_LOG_DIR/$id.log
+        tunnel=$(log_tunnel "$log"); link=$(log_link "$log")
+        if [ "$porcelain" -eq 1 ]; then
+            printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$name" "$state" "$node" "$elapsed" "$left" "$tunnel" "$link"
+        else
+            printf '%-10s %-28s %-9s %-10s %-9s %-9s %s\n' "$id" "$name" "$state" "${node:--}" "$elapsed" "$left" "${tunnel:--}"
+            [ -z "$link" ] || printf '           %s%s%s\n' "$DIM" "$link" "$RST"
+        fi
+    done <<< "$rows"
+}
+
+cmd_show() {
+    local id=${1:-}; [ -n "$id" ] || die "show needs a JOBID"
+    local row
+    row=$(squeue_jobs | awk -F'|' -v id="$id" '$1 == id')
+    if [ -n "$row" ]; then
+        IFS='|' read -r _ name state node elapsed left <<< "$row"
+        printf 'STATE=%s\nNODE=%s\nNAME=%s\nELAPSED=%s\nLEFT=%s\n' "$state" "$node" "$name" "$elapsed" "$left"
+    else
+        # Not in squeue any more: ask the accounting db so the launcher can tell
+        # "finished" from "never existed".
+        state=$(sacct -j "$id" -n -X -o State 2>/dev/null | head -n1 | tr -d ' ' || true)
+        printf 'STATE=%s\nNODE=\nNAME=\nELAPSED=\nLEFT=\n' "${state:-UNKNOWN}"
+    fi
+    printf 'LOG=%s\n---LOG---\n' "$VT_LOG_DIR/$id.log"
+    [ -f "$VT_LOG_DIR/$id.log" ] && cat "$VT_LOG_DIR/$id.log" || true
+}
+
+cmd_logs() {
+    local id=${1:-}; [ -n "$id" ] || die "logs needs a JOBID"
+    local log=$VT_LOG_DIR/$id.log
+    if [ "${2:-}" = "-f" ]; then
+        touch "$log"; exec tail -n 60 -F "$log"
+    fi
+    [ -f "$log" ] || die "no log yet at $log"
+    tail -n 80 "$log"
+}
+
+cmd_stop() {
+    local target=${1:-}; [ -n "$target" ] || die "stop needs a JOBID or LABEL"
+    local ids
+    if [[ "$target" =~ ^[0-9]+$ ]]; then
+        ids=$target
+    else
+        local n; n=$(sanitize_name "$target")
+        ids=$(squeue_jobs | awk -F'|' -v n="$JOB_PREFIX-$n" '$2 == n {print $1}')
+        [ -n "$ids" ] || die "no running tunnel job named $JOB_PREFIX-$n"
+    fi
+    # shellcheck disable=SC2086
+    scancel $ids && echo "cancelled: $ids"
+}
+
+# --- configs / profiles -----------------------------------------------------
+cmd_configs() {
+    local porcelain=0; [ "${1:-}" = "--porcelain" ] && porcelain=1
+    local f name ws hd found=0
+    for f in "$CLAUDE_LAUNCH_CONFIG_DIR"/*.conf; do
+        [ -e "$f" ] || continue
+        found=1
+        name=${f##*/}; name=${name%.conf}
+        if ! config_is_valid "$f"; then
+            [ "$porcelain" -eq 1 ] || warn "$name: unexpected content, skipped"
+            continue
+        fi
+        ws=$(config_field "$f" WORKSPACE); hd=$(config_field "$f" CLAUDE_MOBILE_HOME)
+        if [ "$porcelain" -eq 1 ]; then printf '%s|%s|%s\n' "$name" "$ws" "$hd"
+        else printf '  %s%-20s%s %s  %s(home: %s)%s\n' "$BOLD" "$name" "$RST" "$ws" "$DIM" "$hd" "$RST"; fi
+    done
+    if [ "$found" -eq 0 ] && [ "$porcelain" -eq 0 ]; then
+        echo "No saved claude-launch configs in $CLAUDE_LAUNCH_CONFIG_DIR."
+        echo "Create one with 'claude-launch' -> 'Save current config', or pass --workspace/--rw/--ro directly."
+    fi
+}
+
+cmd_profiles() {
+    local porcelain=0; [ "${1:-}" = "--porcelain" ] && porcelain=1
+    local d f name seen=" "
+    # User profiles (~/.vibe-tunnel/profiles) shadow repo profiles of the same name.
+    for d in "$VT_USER_PROFILES" "$VIBE_TUNNEL_DIR/profiles"; do
+        [ -d "$d" ] || continue
+        for f in "$d"/*.sbatch; do
+            [ -e "$f" ] || continue
+            name=${f##*/}; name=${name%.sbatch}
+            case "$seen" in *" $name "*) continue ;; esac
+            seen="$seen$name "
+            if [ "$porcelain" -eq 1 ]; then printf '%s|%s|%s\n' "$name" "$f" "$(profile_summary "$f")"
+            else printf '  %s%-18s%s %s  %s%s%s\n' "$BOLD" "$name" "$RST" "$(profile_summary "$f")" "$DIM" "$f" "$RST"; fi
+        done
+    done
+}
+
+# --- doctor -----------------------------------------------------------------
+cmd_doctor() {
+    printf '%s== vibe-tunnel doctor ==%s\n' "$BOLD" "$RST"
+    echo "  repo:        $VIBE_TUNNEL_DIR"
+    echo "  euler-vibe:  $EULER_VIBE_DIR"
+    echo "  state dir:   $VT_STATE_DIR"
+    echo
+    [ -d "$EULER_VIBE_DIR" ] && ok "euler-vibe checkout found" || warn "euler-vibe not found; set EULER_VIBE_DIR in $VT_ENV"
+    [ -e "$CLAUDE_MOBILE_IMAGE" ] && ok "image: $CLAUDE_MOBILE_IMAGE ($(du -h "$CLAUDE_MOBILE_IMAGE" | cut -f1))" || warn "image missing: $CLAUDE_MOBILE_IMAGE  (cd $EULER_VIBE_DIR && ./setup.sh)"
+    [ -f "$EULER_VIBE_DIR/bin/claude-mobile-shellrc" ] && ok "shellrc: $EULER_VIBE_DIR/bin/claude-mobile-shellrc" || warn "claude-mobile-shellrc missing (container terminals will lack the claude helpers)"
+    if [ -x "$VT_CODE_CLI" ]; then ok "VS Code CLI: $VT_CODE_CLI ($("$VT_CODE_CLI" --version 2>/dev/null | head -n1))"
+    else warn "VS Code CLI missing: $VT_CODE_CLI  (run ./setup.sh)"; fi
+    command -v singularity >/dev/null 2>&1 || command -v apptainer >/dev/null 2>&1 \
+        && ok "singularity/apptainer on PATH" || warn "singularity/apptainer not on PATH (fine on a login node; jobs load it)"
+    command -v sbatch >/dev/null 2>&1 && ok "slurm (sbatch) available" || warn "sbatch not found"
+    if [ -n "${http_proxy:-}${HTTP_PROXY:-}" ]; then ok "proxy set: ${http_proxy:-$HTTP_PROXY}"
+    else warn "no http_proxy in this shell (jobs run 'module load eth_proxy' themselves)"; fi
+    local n; n=$(ls "$CLAUDE_LAUNCH_CONFIG_DIR"/*.conf 2>/dev/null | wc -l | tr -d ' ')
+    ok "claude-launch configs: $n in $CLAUDE_LAUNCH_CONFIG_DIR"
+    echo
+    cmd_profiles
+}
+
+# --- main -------------------------------------------------------------------
+cmd=${1:-}; [ $# -gt 0 ] && shift
+case "$cmd" in
+    submit)   cmd_submit "$@" ;;
+    status)   cmd_status "$@" ;;
+    show)     cmd_show "$@" ;;
+    logs)     cmd_logs "$@" ;;
+    stop)     cmd_stop "$@" ;;
+    configs)  cmd_configs "$@" ;;
+    profiles) cmd_profiles "$@" ;;
+    doctor)   cmd_doctor "$@" ;;
+    ""|-h|--help|help) usage ;;
+    *) die "unknown command '$cmd' (try: vibe-tunnel help)" ;;
+esac

@@ -1,0 +1,4 @@
+# Scripts run on the cluster: keep LF even on Windows checkouts
+*.sh text eol=lf
+*.sbatch text eol=lf
+bin/* text eol=lf
