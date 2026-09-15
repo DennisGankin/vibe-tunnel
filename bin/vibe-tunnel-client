@@ -58,7 +58,8 @@ save_cfg() {
 }
 
 # --- ssh ---------------------------------------------------------------------------
-SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$HOME/.ssh/vibe-tunnel-%C" -o ControlPersist=15m)
+SSH_CONTROL="$HOME/.ssh/vibe-tunnel-%C"
+SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$SSH_CONTROL" -o ControlPersist=15m -o ConnectTimeout=20 -o ServerAliveInterval=15 -o ServerAliveCountMax=2)
 remote_cmd() {  # remote_cmd ARGS... -> one shell string running the cluster CLI
     local s="NO_COLOR=${NO_COLOR:-} $(printf '%q' "$VT_REMOTE_DIR/bin/vibe-tunnel")" a
     for a in "$@"; do s+=" $(printf '%q' "$a")"; done
@@ -68,10 +69,27 @@ rvt()  { ssh "${SSH_OPTS[@]}" "$VT_HOST" "$(remote_cmd "$@")"; }          # plai
 rvtt() { ssh -t "${SSH_OPTS[@]}" "$VT_HOST" "$(remote_cmd "$@")"; }       # with a tty (menus, tail -f)
 rsh()  { ssh "${SSH_OPTS[@]}" "$VT_HOST" "$@"; }                           # arbitrary remote shell
 
+# The multiplexed master connection can be left half-dead by a VPN or network
+# hiccup; then every call through it stalls or fails. Check it first and drop it
+# if it is unhealthy, so the next call opens a fresh connection.
+reset_stale_master() {
+    if ! ssh -O check -o "ControlPath=$SSH_CONTROL" "$VT_HOST" >/dev/null 2>&1; then
+        ssh -O exit -o "ControlPath=$SSH_CONTROL" "$VT_HOST" >/dev/null 2>&1 || true
+        # -O exit can leave the socket file behind when the master is already gone
+        local sock; sock=$(ssh -G -o "ControlPath=$SSH_CONTROL" "$VT_HOST" 2>/dev/null | awk '$1=="controlpath"{print $2}')
+        [ -n "$sock" ] && [ -S "$sock" ] && rm -f "$sock"
+    fi
+}
+
 connect() {
     mkdir -p "$HOME/.ssh"
+    reset_stale_master
     # Interactive once (passphrase / OTP); later calls reuse the control connection.
-    ssh "${SSH_OPTS[@]}" "$VT_HOST" true || die "ssh $VT_HOST failed. Check ~/.ssh/config and your network/VPN."
+    local err
+    if ! err=$(ssh "${SSH_OPTS[@]}" "$VT_HOST" true 2>&1 >/dev/null); then
+        [ -z "$err" ] || printf '%s\n' "$err" >&2
+        die "ssh $VT_HOST failed. Try a plain 'ssh $VT_HOST' first (network/VPN, ~/.ssh/config)."
+    fi
     rsh "test -x $(printf '%q' "$VT_REMOTE_DIR/bin/vibe-tunnel")" \
         || die "$VT_REMOTE_DIR/bin/vibe-tunnel not found on $VT_HOST. Set VT_REMOTE_DIR with: vibe-tunnel client-setup"
 }
