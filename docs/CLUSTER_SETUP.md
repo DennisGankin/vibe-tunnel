@@ -14,7 +14,8 @@ module load eth_proxy
 ```
 Building on a login node may hit memory limits; euler-vibe's README suggests `./setup.sh --low-mem` or building in a job. A shared image works too: point `CLAUDE_MOBILE_IMAGE` in `~/.vibe-tunnel/env` at it.
 
-Create at least one sandbox config with `claude-launch` -> *Save current config*, so `vibe-tunnel configs` has something to offer. (Not required: `--workspace` works without configs.)
+Sandbox configs are created with `vibe-tunnel launch` -> *Save current config* (configs you saved earlier with
+`claude-launch` are read too). Not required: `--workspace` works without configs.
 
 ## 2. vibe-tunnel
 

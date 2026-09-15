@@ -27,13 +27,12 @@ EULER_VIBE_DIR=${EULER_VIBE_DIR:-$(dirname "$VIBE_TUNNEL_DIR")/euler-vibe}
 [ -d "$EULER_VIBE_DIR" ] || EULER_VIBE_DIR=$HOME/euler-vibe
 CLAUDE_MOBILE_IMAGE=${CLAUDE_MOBILE_IMAGE:-$EULER_VIBE_DIR/images/claude-mobile.sif}
 CLAUDE_MOBILE_SHELLRC=${CLAUDE_MOBILE_SHELLRC:-$EULER_VIBE_DIR/bin/claude-mobile-shellrc}
-CLAUDE_LAUNCH_CONFIG_DIR=${CLAUDE_LAUNCH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-launch/configs}
 VT_CODE_CLI=${VT_CODE_CLI:-$VIBE_TUNNEL_DIR/cli/code}
 [ -x "$VT_CODE_CLI" ] || { [ -x "$HOME/code" ] && VT_CODE_CLI=$HOME/code; } || true
 VT_ENTRY=$VIBE_TUNNEL_DIR/bin/vibe-tunnel-entry
 
 # --- 1. per-job settings ----------------------------------------------------
-VT_TUNNEL_NAME= VT_CONFIG= VT_WORKSPACE= VT_HOME= VT_EXTENSIONS=
+VT_TUNNEL_NAME= VT_CONFIG= VT_CONFIG_FILE= VT_WORKSPACE= VT_HOME= VT_EXTENSIONS=
 VT_RW_BINDS=() VT_RO_BINDS=()
 
 # Only the keys `vibe-tunnel submit` writes are accepted, so the file stays data.
@@ -42,7 +41,7 @@ env_is_valid() {
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
             ''|'#'*) ;;
-            VT_TUNNEL_NAME=*|VT_CONFIG=*|VT_WORKSPACE=*|VT_HOME=*|VT_EXTENSIONS=*|'VT_RW_BINDS=('*|'VT_RO_BINDS=('*) ;;
+            VT_TUNNEL_NAME=*|VT_CONFIG=*|VT_CONFIG_FILE=*|VT_WORKSPACE=*|VT_HOME=*|VT_EXTENSIONS=*|'VT_RW_BINDS=('*|'VT_RO_BINDS=('*) ;;
             *) return 1 ;;
         esac
     done < "$1"
@@ -52,7 +51,7 @@ config_is_valid() {
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
             ''|'#'*) ;;
-            WORKSPACE=*|MODE=*|CLAUDE_MOBILE_HOME=*|'RW_BINDS=('*|'RO_BINDS=('*) ;;
+            WORKSPACE=*|MODE=*|CLAUDE_MOBILE_HOME=*|'RW_BINDS=('*|'RO_BINDS=('*|PROFILE=*|LABEL=*) ;;
             *) return 1 ;;
         esac
     done < "$1"
@@ -66,14 +65,13 @@ if [ -n "${VT_ENV_FILE:-}" ]; then
 fi
 
 # A saved claude-launch config supplies the sandbox; explicit VT_* values win.
-WORKSPACE= CLAUDE_MOBILE_HOME= RW_BINDS=() RO_BINDS=() MODE=
-if [ -n "$VT_CONFIG" ]; then
-    cf=$CLAUDE_LAUNCH_CONFIG_DIR/$VT_CONFIG.conf
-    [ -f "$cf" ] || die "claude-launch config not found: $cf"
-    config_is_valid "$cf" || die "config has unexpected content: $cf"
+WORKSPACE= CLAUDE_MOBILE_HOME= RW_BINDS=() RO_BINDS=() MODE= PROFILE= LABEL=
+if [ -n "$VT_CONFIG_FILE" ]; then
+    [ -f "$VT_CONFIG_FILE" ] || die "config file not found: $VT_CONFIG_FILE"
+    config_is_valid "$VT_CONFIG_FILE" || die "config has unexpected content: $VT_CONFIG_FILE"
     # shellcheck disable=SC1090
-    . "$cf"
-    log "using claude-launch config '$VT_CONFIG'"
+    . "$VT_CONFIG_FILE"
+    log "using saved config '${VT_CONFIG:-$VT_CONFIG_FILE}'"
 fi
 WORKSPACE=${VT_WORKSPACE:-${WORKSPACE:-$HOME}}
 CLAUDE_MOBILE_HOME=${VT_HOME:-${CLAUDE_MOBILE_HOME:-$EULER_VIBE_DIR/home/claude-mobile}}
