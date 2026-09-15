@@ -2,8 +2,4 @@
 cli/code
 cli/*.tar.gz
 
-# Local launcher config with your hostname/paths
-vibe_tunnel.cfg
-
-__pycache__/
 .DS_Store

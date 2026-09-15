@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# vibe-tunnel-client --------------------------------------------------------
+# Laptop side of vibe-tunnel. `bin/vibe-tunnel` execs this when it runs on a
+# machine without slurm. Everything is done over plain `ssh` to the cluster
+# (your ~/.ssh/config, keys, agent and aliases apply): run the remote launch
+# menu, wait for the tunnel, then open it in desktop VS Code here.
+#
+#   vibe-tunnel                       menu on the cluster -> submit -> wait -> open VS Code
+#   vibe-tunnel launch [--config N]   same
+#   vibe-tunnel submit ...            non-interactive submit (same flags as on the cluster), then wait + open
+#   vibe-tunnel open JOBID|LABEL      (re)open a running tunnel in VS Code
+#   vibe-tunnel wait JOBID            wait for a submitted job, then open
+#   vibe-tunnel status|logs|stop|configs|profiles|doctor ...   run on the cluster
+#   vibe-tunnel client-setup          write ~/.config/vibe-tunnel/client (host, remote dir, how to open)
+#
+# Settings file (~/.config/vibe-tunnel/client):
+#   VT_HOST=euler                       ssh host or alias
+#   VT_REMOTE_DIR=/path/to/vibe-tunnel  the cluster clone of this repo
+#   VT_OPEN_WITH=code                   code | browser | none
+
+VT_CLIENT_BIN=$(realpath "$0")
+VIBE_TUNNEL_DIR=${VIBE_TUNNEL_DIR:-$(dirname "$(dirname "$VT_CLIENT_BIN")")}
+VT_CLIENT_CFG=${VT_CLIENT_CFG:-${XDG_CONFIG_HOME:-$HOME/.config}/vibe-tunnel/client}
+VT_HOST=${VT_HOST:-} VT_REMOTE_DIR=${VT_REMOTE_DIR:-} VT_OPEN_WITH=${VT_OPEN_WITH:-}
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    BOLD=$'\033[1m'; DIM=$'\033[2m'; RST=$'\033[0m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; CYAN=$'\033[36m'
+else BOLD= DIM= RST= GREEN= YELLOW= RED= CYAN=; fi
+ok()   { printf '  %s✓%s %s\n' "$GREEN" "$RST" "$*"; }
+warn() { printf '  %s!%s %s\n' "$YELLOW" "$RST" "$*" >&2; }
+die()  { printf '%svibe-tunnel: %s%s\n' "$RED" "$*" "$RST" >&2; exit 1; }
+usage() { sed -n '4,22p' "$VT_CLIENT_BIN" | sed 's/^# \{0,1\}//'; }
+
+# --- settings -------------------------------------------------------------------
+cfg_is_valid() {
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in ''|'#'*|VT_HOST=*|VT_REMOTE_DIR=*|VT_OPEN_WITH=*) ;; *) return 1 ;; esac
+    done < "$1"
+}
+load_cfg() {
+    [ -f "$VT_CLIENT_CFG" ] || return 1
+    cfg_is_valid "$VT_CLIENT_CFG" || die "$VT_CLIENT_CFG has unexpected content"
+    local h=$VT_HOST r=$VT_REMOTE_DIR o=$VT_OPEN_WITH
+    # shellcheck disable=SC1090
+    . "$VT_CLIENT_CFG"
+    # environment overrides the file
+    VT_HOST=${h:-$VT_HOST}; VT_REMOTE_DIR=${r:-$VT_REMOTE_DIR}; VT_OPEN_WITH=${o:-$VT_OPEN_WITH}
+}
+save_cfg() {
+    mkdir -p "$(dirname "$VT_CLIENT_CFG")"
+    {
+        printf '# vibe-tunnel laptop client settings (written by client-setup %s)\n' "$(date '+%Y-%m-%d')"
+        printf 'VT_HOST=%q\nVT_REMOTE_DIR=%q\nVT_OPEN_WITH=%q\n' "$VT_HOST" "$VT_REMOTE_DIR" "$VT_OPEN_WITH"
+    } > "$VT_CLIENT_CFG"
+}
+
+# --- ssh ---------------------------------------------------------------------------
+SSH_OPTS=(-o ControlMaster=auto -o "ControlPath=$HOME/.ssh/vibe-tunnel-%C" -o ControlPersist=15m)
+remote_cmd() {  # remote_cmd ARGS... -> one shell string running the cluster CLI
+    local s="NO_COLOR=${NO_COLOR:-} $(printf '%q' "$VT_REMOTE_DIR/bin/vibe-tunnel")" a
+    for a in "$@"; do s+=" $(printf '%q' "$a")"; done
+    printf '%s' "$s"
+}
+rvt()  { ssh "${SSH_OPTS[@]}" "$VT_HOST" "$(remote_cmd "$@")"; }          # plain
+rvtt() { ssh -t "${SSH_OPTS[@]}" "$VT_HOST" "$(remote_cmd "$@")"; }       # with a tty (menus, tail -f)
+rsh()  { ssh "${SSH_OPTS[@]}" "$VT_HOST" "$@"; }                           # arbitrary remote shell
+
+connect() {
+    mkdir -p "$HOME/.ssh"
+    # Interactive once (passphrase / OTP); later calls reuse the control connection.
+    ssh "${SSH_OPTS[@]}" "$VT_HOST" true || die "ssh $VT_HOST failed. Check ~/.ssh/config and your network/VPN."
+    rsh "test -x $(printf '%q' "$VT_REMOTE_DIR/bin/vibe-tunnel")" \
+        || die "$VT_REMOTE_DIR/bin/vibe-tunnel not found on $VT_HOST. Set VT_REMOTE_DIR with: vibe-tunnel client-setup"
+}
+
+# --- opening ---------------------------------------------------------------------------
+copy_clipboard() {
+    if command -v pbcopy >/dev/null 2>&1; then printf '%s' "$1" | pbcopy
+    elif command -v xclip >/dev/null 2>&1; then printf '%s' "$1" | xclip -selection clipboard
+    elif command -v wl-copy >/dev/null 2>&1; then printf '%s' "$1" | wl-copy
+    else return 1; fi
+}
+open_url() {
+    if command -v open >/dev/null 2>&1; then open "$1"
+    elif command -v xdg-open >/dev/null 2>&1; then xdg-open "$1" >/dev/null 2>&1
+    elif [ -n "${BROWSER:-}" ]; then "$BROWSER" "$1"
+    else printf '  open in your browser: %s\n' "$1"; fi
+}
+open_tunnel() {  # open_tunnel NAME [LINK]
+    local name=$1 link=${2:-https://vscode.dev/tunnel/$1/workspace}
+    local uri="vscode-remote://tunnel+$name/workspace"
+    printf '\n  %stunnel%s   %s\n  %sdesktop%s  code --folder-uri %q\n  %sbrowser%s  %s\n\n' \
+        "$BOLD" "$RST" "$name" "$BOLD" "$RST" "$uri" "$BOLD" "$RST" "$link"
+    case "$VT_OPEN_WITH" in
+        none) ;;
+        browser) open_url "$link" ;;
+        *)
+            if command -v code >/dev/null 2>&1; then
+                if ! code --list-extensions 2>/dev/null | grep -qi '^ms-vscode.remote-server$'; then
+                    printf '  installing the "Remote - Tunnels" extension in VS Code…\n'
+                    code --install-extension ms-vscode.remote-server >/dev/null 2>&1 || warn "could not install ms-vscode.remote-server; install it from the Extensions view"
+                fi
+                printf '  opening in VS Code…\n'
+                code --folder-uri "$uri"
+            else
+                warn "'code' is not on PATH (VS Code: Shell Command: Install 'code' command). Opening the browser instead."
+                open_url "$link"
+            fi ;;
+    esac
+}
+
+# Stream the remote wait, react to its machine-readable lines, then open.
+wait_and_open() {
+    local id=$1 line tunnel= link= url= code=
+    while IFS= read -r line; do
+        case "$line" in
+            DEVICE_URL=*)  url=${line#DEVICE_URL=} ;;
+            DEVICE_CODE=*) code=${line#DEVICE_CODE=}
+                           if copy_clipboard "$code"; then printf '  %s(code copied to clipboard)%s\n' "$DIM" "$RST"; fi
+                           open_url "$url" ;;
+            TUNNEL=*)      tunnel=${line#TUNNEL=} ;;
+            LINK=*)        link=${line#LINK=} ;;
+            DESKTOP=*)     ;;
+            *)             printf '%s\n' "$line" ;;
+        esac
+    done < <(rvt wait "$id" 2>&1 || true)
+    [ -n "$tunnel" ] || die "job $id ended before the tunnel came up (see: vibe-tunnel logs $id)"
+    open_tunnel "$tunnel" "$link"
+    printf '  %slater:  vibe-tunnel open %s      stop:  vibe-tunnel stop %s%s\n' "$DIM" "$id" "$id" "$RST"
+}
+
+# --- commands -------------------------------------------------------------------------------
+cmd_client_setup() {
+    load_cfg || true
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --host) shift; VT_HOST=$1 ;;
+            --remote-dir) shift; VT_REMOTE_DIR=$1 ;;
+            --open-with) shift; VT_OPEN_WITH=$1 ;;
+            *) die "client-setup: unknown option $1" ;;
+        esac; shift
+    done
+    if [ -t 0 ]; then
+        read -e -r -p "ssh host or alias for the cluster [${VT_HOST:-euler}]: " r; VT_HOST=${r:-${VT_HOST:-euler}}
+        read -e -r -p "path of the vibe-tunnel clone on the cluster [${VT_REMOTE_DIR:-~/vibe-tunnel}]: " r; VT_REMOTE_DIR=${r:-${VT_REMOTE_DIR:-~/vibe-tunnel}}
+        read -e -r -p "open ready tunnels with (code | browser | none) [${VT_OPEN_WITH:-code}]: " r; VT_OPEN_WITH=${r:-${VT_OPEN_WITH:-code}}
+    fi
+    VT_HOST=${VT_HOST:-euler}; VT_REMOTE_DIR=${VT_REMOTE_DIR:-~/vibe-tunnel}; VT_OPEN_WITH=${VT_OPEN_WITH:-code}
+    case "$VT_OPEN_WITH" in code|browser|none) ;; *) die "open-with must be code, browser or none" ;; esac
+    save_cfg
+    ok "wrote $VT_CLIENT_CFG"
+    printf '  checking the connection…\n'
+    connect && ok "$VT_HOST: $VT_REMOTE_DIR/bin/vibe-tunnel found"
+    printf '\n  Run %svibe-tunnel%s to start.\n' "$CYAN" "$RST"
+}
+
+cmd_launch() {
+    local before after id
+    before=$(rsh 'cat ~/.vibe-tunnel/last-job 2>/dev/null' || true)
+    # The menu needs a tty on the cluster; it returns right after submitting.
+    rvtt launch --no-wait "$@" || true
+    after=$(rsh 'cat ~/.vibe-tunnel/last-job 2>/dev/null' || true)
+    if [ -z "$after" ] || [ "$after" = "$before" ]; then
+        printf '  %snothing submitted.%s\n' "$DIM" "$RST"; exit 0
+    fi
+    id=${after%% *}
+    printf '  %swaiting for job %s (Ctrl-C stops waiting; the job keeps running)…%s\n' "$DIM" "$id" "$RST"
+    wait_and_open "$id"
+}
+
+cmd_submit() {
+    local out id
+    out=$(rvt submit --json "$@") || die "submit failed"
+    printf '%s\n' "$out" | sed -n 's/.*"job_id":"\([0-9]*\)".*/  submitted job \1/p'
+    id=$(printf '%s\n' "$out" | sed -n 's/.*"job_id":"\([0-9]*\)".*/\1/p' | tail -n1)
+    [ -n "$id" ] || die "could not read the job id from: $out"
+    wait_and_open "$id"
+}
+
+cmd_open() {
+    local target=${1:-}; [ -n "$target" ] || die "open needs a JOBID or LABEL"
+    local rows id name state node el left tunnel link
+    rows=$(rvt status --porcelain)
+    while IFS='|' read -r id name state node el left tunnel link; do
+        if [ "$id" = "$target" ] || [ "$name" = "vibe-tunnel-$target" ] || [ "$tunnel" = "$target" ]; then
+            [ -n "$tunnel" ] || die "job $id has not reported its tunnel yet (vibe-tunnel wait $id)"
+            open_tunnel "$tunnel" "$link"; return
+        fi
+    done <<< "$rows"
+    die "no running tunnel matches '$target' (vibe-tunnel status)"
+}
+
+# --- main --------------------------------------------------------------------------------------
+cmd=${1:-launch}; [ $# -gt 0 ] && shift
+case "$cmd" in
+    client-setup) cmd_client_setup "$@"; exit 0 ;;
+    -h|--help|help) usage; exit 0 ;;
+esac
+load_cfg || die "no client settings yet. Run:  vibe-tunnel client-setup"
+connect
+case "$cmd" in
+    launch|start)          cmd_launch "$@" ;;
+    submit)                cmd_submit "$@" ;;
+    open)                  cmd_open "$@" ;;
+    wait)                  [ -n "${1:-}" ] || die "wait needs a JOBID"; wait_and_open "$1" ;;
+    logs)                  rvtt logs "$@" ;;
+    status|list)           rvt status "$@" ;;
+    stop|configs|profiles|doctor|show) rvt "$cmd" "$@" ;;
+    *) die "unknown command '$cmd' (try: vibe-tunnel help)" ;;
+esac

@@ -1,6 +1,6 @@
 # Cluster setup and first-run checklist
 
-Everything in this file has to happen on Euler (login node unless stated). The laptop launcher assumes it is done.
+Everything in this file has to happen on Euler (login node unless stated). The laptop client assumes it is done.
 
 ## 1. euler-vibe with a built image
 
@@ -28,7 +28,7 @@ vibe-tunnel doctor
 ```
 `setup.sh` downloads Microsoft's standalone VS Code CLI (`cli-alpine-x64`, static, ~15 MB) into `cli/code`. It is the same binary `codeserver_tunnel` uses as `$HOME/code`; if that exists, it is used as a fallback.
 
-Adjust `profiles/*.sbatch` for your account/partition. Profiles in `~/.vibe-tunnel/profiles/` take precedence over the repo's and are what the laptop launcher syncs to.
+Adjust `profiles/*.sbatch` for your account/partition. Profiles in `~/.vibe-tunnel/profiles/` take precedence over the repo's.
 
 ## 3. First tunnel, by hand
 
@@ -51,7 +51,7 @@ Then, on the laptop: `code --folder-uri 'vscode-remote://tunnel+test/workspace'`
 
 Status after the first real run on Euler (2026-09-15, CLI 1.125.1 from `~/code`, image 651 MB):
 
-- confirmed: tunnel relay reachable from inside the container via the forwarded proxy; `vscode-remote://tunnel+NAME/workspace` opens in desktop VS Code; `~/.bashrc` block and euler-vibe shellrc active in VS Code terminals (`claude` function present); `HOME=/home` with the sandbox state; laptop launcher submit / wait / open / reopen.
+- confirmed: tunnel relay reachable from inside the container via the forwarded proxy; `vscode-remote://tunnel+NAME/workspace` opens in desktop VS Code; `~/.bashrc` block and euler-vibe shellrc active in VS Code terminals (`claude` function present); `HOME=/home` with the sandbox state; laptop-side submit / wait / open / reopen (with the earlier Python launcher; the bash client uses the same remote commands).
 - not confirmed: `--install-extension` did not preinstall Claude Code with CLI 1.125.1 (see section 6); `token.json` reuse and `unregister` on stop still to be checked in the log.
 
 Each remaining assumption has a fallback; fix the script if reality differs.
@@ -63,12 +63,12 @@ Each remaining assumption has a fallback; fix the script if reality differs.
 | `code tunnel --install-extension ID` exists in the current CLI | `bin/vibe-tunnel-entry` (checked at runtime via `--help`) | it is skipped with a log line; install Claude Code from the Extensions view once, it persists in `/home/.vscode-server` |
 | `code tunnel unregister` on exit frees the tunnel name (accounts are capped at a handful of tunnels) | `bin/vibe-tunnel-entry` | stale tunnels accumulate; clean up with `code tunnel unregister` / the Remote Explorer in VS Code |
 | `--signal=B:TERM@120` reaches the job script and Apptainer forwards TERM into the container | `profiles/*.sbatch`, `bin/vibe-tunnel-job` | the tunnel is killed without unregistering (harmless, see previous row) |
-| `vscode-remote://tunnel+<name>/workspace` opens the tunnel in desktop VS Code | `vibe_tunnel.py` | use the printed `https://vscode.dev/tunnel/...` link and its *Open in VS Code Desktop* button |
+| `vscode-remote://tunnel+<name>/workspace` opens the tunnel in desktop VS Code | `bin/vibe-tunnel-client` | use the printed `https://vscode.dev/tunnel/...` link and its *Open in VS Code Desktop* button |
 | `--nv` on a non-GPU node only warns | `bin/vibe-tunnel-job` | drop `--nv` for CPU profiles via an env toggle (euler-vibe passes it unconditionally too) |
 
 ## 5. Operational notes
 
-- **Logs**: `~/.vibe-tunnel/logs/<jobid>.log` is the slurm output and the only log; the launcher parses it. `vibe-tunnel show <jobid>` prints state + log in one go.
+- **Logs**: `~/.vibe-tunnel/logs/<jobid>.log` is the slurm output and the only log; `vibe-tunnel wait` parses it. `vibe-tunnel show <jobid>` prints state + log in one go.
 - **Concurrency**: one job per label. Each job has its own `--cli-data-dir` (`/home/.vscode-cli/jobs/<jobid>`), which avoids the singleton-lock retries seen in the old `tunnel_output_*.log` files when a data dir was reused across nodes. Dirs older than 7 days are pruned at job start.
 - **Disk**: the VS Code server (~200 MB per VS Code version) and extensions live in `/home/.vscode-server` of the sandbox home, shared by all jobs of that home.
 - **Time limits**: the tunnel dies with the job. VS Code shows a reconnect dialog; start a new job and reopen.

@@ -12,7 +12,7 @@ The difference to `codeserver_tunnel`: the VS Code tunnel is started **inside th
 ```
 laptop                       login node                 compute node (slurm job)
 ──────                       ──────────                 ────────────────────────────────────
-vibe_tunnel.py ── ssh ──►  vibe-tunnel submit ─ sbatch ─►  vibe-tunnel-job (host side)
+vibe-tunnel ──── ssh ──►  vibe-tunnel launch/submit ─ sbatch ─►  vibe-tunnel-job (host side)
                                                              │  binds: workspace, sandbox home,
                                                              │  extra ro/rw dirs, VS Code CLI
                                                              ▼
@@ -31,8 +31,8 @@ No new container image: the VS Code CLI is a static binary that gets bind-mounte
 - **Sandbox configs.** `vibe-tunnel launch` assembles workspace, home, ro/rw binds, resource profile and label in one menu and saves them as named configs. Configs saved with euler-vibe's `claude-launch` are read as well. Or pass `--workspace`, `--rw`, `--ro` directly.
 - **Persistent home.** Auth for Claude, the VS Code login, the downloaded VS Code server and extensions live in the sandbox home (`/home` in the container), so the second start is fast and needs no logins.
 - **Several tunnels at once**, each with its own label, node and resources. Reopen a running one instead of resubmitting.
-- **Resource profiles** are plain sbatch files in `profiles/` (edited locally, synced to the cluster on each start) or `~/.vibe-tunnel/profiles/` on the cluster.
-- **Cluster-only use works too.** Everything is a `vibe-tunnel` subcommand you can run from a login node without the laptop script.
+- **Resource profiles** are plain sbatch files: `profiles/` in the cluster clone, or your own in `~/.vibe-tunnel/profiles/` (which shadow them).
+- **One command, both places.** `vibe-tunnel` is bash: on the cluster it is the CLI, on the laptop (no slurm) it drives the cluster copy over ssh. No Python, no environment.
 
 ## Quick start
 
@@ -51,25 +51,29 @@ vibe-tunnel doctor
 ```
 
 ### Once, on your laptop
-- VS Code desktop with the `code` command on PATH (the launcher installs the *Remote - Tunnels* extension if missing).
-- An `ssh euler` that works (alias in `~/.ssh/config`).
-- `cp vibe_tunnel.cfg.example vibe_tunnel.cfg` and adjust `host` / `remote_dir`.
+```bash
+git clone <this repo> ~/vibe-tunnel
+cd ~/vibe-tunnel && ./setup.sh --client      # asks for the ssh host, the cluster path of the repo, how to open tunnels
+```
+Needs a working `ssh euler` (alias in `~/.ssh/config`) and VS Code desktop with the `code` command on PATH. The
+client installs the *Remote - Tunnels* extension if missing. Settings go to `~/.config/vibe-tunnel/client`.
 
 ### Every time
 ```bash
-python vibe_tunnel.py
+vibe-tunnel
 ```
-1. lists running tunnels: pick one to reopen, or Enter for a new one
-2. choose the sandbox: a saved `claude-launch` config, or a workspace directory
-3. choose a resource profile, optionally give a label
-4. the job is submitted; the launcher waits, handles the one-time VS Code login (opens GitHub's device page, copies the code), then opens VS Code at `/workspace` inside the container
+The same `vibe-tunnel` command works on the laptop and on the cluster; on the laptop it drives the cluster copy over ssh.
 
-Non-interactive:
+1. the launch menu opens on the cluster: workspace, sandbox home, extra read-only / read-write directories (Tab-completes cluster paths), resource profile and tunnel label, all visible at once; save or reuse named configs
+2. Launch submits the job; the laptop waits, handles the one-time VS Code login (opens GitHub's device page, copies the code), then opens desktop VS Code at `/workspace` inside the container
+
+Other laptop commands (all run on the cluster over ssh):
 ```bash
-python vibe_tunnel.py start --profile gpu_4h --config myproj --name llmag
-python vibe_tunnel.py list
-python vibe_tunnel.py open 14272447
-python vibe_tunnel.py stop llmag
+vibe-tunnel submit --config myproj           # non-interactive: submit, wait, open
+vibe-tunnel status                           # running tunnels + links
+vibe-tunnel open myproj                      # (re)open a running tunnel in VS Code
+vibe-tunnel stop myproj
+vibe-tunnel logs <jobid> -f
 ```
 
 ### From a login node instead
@@ -107,11 +111,11 @@ Then on the laptop: `code --folder-uri 'vscode-remote://tunnel+myproj/workspace'
 ## Repository layout
 
 ```
-vibe_tunnel.py            laptop launcher (stdlib only; uses your ssh)
-vibe_tunnel.cfg.example   laptop settings (host, remote_dir, how to open)
 profiles/*.sbatch         resource profiles: #SBATCH lines + exec bin/vibe-tunnel-job
-setup.sh                  cluster: find euler-vibe, download VS Code CLI, write ~/.vibe-tunnel/env
-bin/vibe-tunnel           cluster CLI: launch / submit / wait / status / show / logs / stop / configs / profiles / doctor
+setup.sh                  cluster: find euler-vibe, download VS Code CLI, write ~/.vibe-tunnel/env; laptop: --client
+bin/vibe-tunnel           one entry point: cluster CLI (launch / submit / wait / status / show / logs / stop /
+                          configs / profiles / doctor), or laptop client when there is no slurm
+bin/vibe-tunnel-client    laptop side: runs the remote menu over ssh, waits, opens VS Code (plain bash + ssh)
 bin/vibe-tunnel-launch    the interactive menu behind `vibe-tunnel launch` (adapted from claude-launch)
 bin/vibe-tunnel-job       runs in the slurm job on the host: resolves the sandbox, starts the container
 bin/vibe-tunnel-entry     runs inside the container: home bootstrap, token seeding, `code tunnel`
@@ -129,5 +133,5 @@ Cluster-side state lives in `~/.vibe-tunnel/`: `env` (site settings), `logs/<job
 | sandbox definition | none (host `$HOME`) | `claude-launch` saved configs | reused as-is via `--config` |
 | container | none | `claude-mobile` builds the `singularity exec` | `bin/vibe-tunnel-job` mirrors its binds and proxy handling |
 | VS Code | `code tunnel` on the node, per-job `--cli-data-dir` | none | `code tunnel` inside the container, per-job data dir + shared login token |
-| laptop side | paramiko, uploads script, parses log | none | plain ssh, calls `vibe-tunnel`, parses log |
+| laptop side | paramiko, uploads script, parses log | none | plain bash + ssh, runs the remote menu, `vibe-tunnel wait` |
 | session tracking | local `tunnel_sessions.json` | none | `squeue` job names `vibe-tunnel-<label>` (no local state) |
