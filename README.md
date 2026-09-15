@@ -167,7 +167,7 @@ The same thing as a sidebar inside VS Code: running tunnels (click to connect, s
 setup with a remote directory browser. Install the `.vsix` from [vscode-extension/](vscode-extension/):
 
 ```bash
-code --install-extension vscode-extension/vibe-tunnel-0.1.1.vsix
+code --install-extension vscode-extension/vibe-tunnel-0.1.2.vsix
 ```
 If you use VS Code **profiles**, install it into the profile you work in: `code --profile <name> --install-extension …`,
 or *Extensions → ··· → Install from VSIX…* inside that profile. Extensions are per profile.
