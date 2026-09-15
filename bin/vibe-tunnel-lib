@@ -1,0 +1,140 @@
+# vibe-tunnel-lib -----------------------------------------------------------------
+# Shared by bin/vibe-tunnel (CLI) and bin/vibe-tunnel-job (host side of a run):
+# site settings, config-file validation, sandbox resolution and the Singularity
+# argument list. Sourced, not executed. Expects VIBE_TUNNEL_DIR to be set.
+
+VT_STATE_DIR=${VT_STATE_DIR:-$HOME/.vibe-tunnel}
+VT_LOG_DIR=$VT_STATE_DIR/logs
+VT_JOB_DIR=$VT_STATE_DIR/jobs
+VT_USER_PROFILES=$VT_STATE_DIR/profiles
+VT_ENV=$VT_STATE_DIR/env
+
+# Site settings written by setup.sh (EULER_VIBE_DIR, VT_IMAGE, VT_CODE_CLI, ...).
+# shellcheck disable=SC1090
+[ -f "$VT_ENV" ] && . "$VT_ENV"
+
+# Container image: our own, or -- as a fallback for sites that already run
+# euler-vibe -- its claude-mobile.sif.
+EULER_VIBE_DIR=${EULER_VIBE_DIR:-}
+VT_IMAGE=${VT_IMAGE:-$VIBE_TUNNEL_DIR/images/vibe-tunnel.sif}
+if [ ! -e "$VT_IMAGE" ]; then
+    CLAUDE_MOBILE_IMAGE=${CLAUDE_MOBILE_IMAGE:-${EULER_VIBE_DIR:+$EULER_VIBE_DIR/images/claude-mobile.sif}}
+    [ -n "$CLAUDE_MOBILE_IMAGE" ] && [ -e "$CLAUDE_MOBILE_IMAGE" ] && VT_IMAGE=$CLAUDE_MOBILE_IMAGE
+fi
+VT_SHELLRC=${VT_SHELLRC:-$VIBE_TUNNEL_DIR/bin/vibe-tunnel-shellrc}
+VT_ENTRY=$VIBE_TUNNEL_DIR/bin/vibe-tunnel-entry
+
+# Default sandbox home. Keeps euler-vibe's when that is the image in use, so
+# existing logins carry over; otherwise home/default inside this repo.
+if [ -n "${VT_DEFAULT_HOME:-}" ]; then :
+elif [ -n "$EULER_VIBE_DIR" ] && [ "$VT_IMAGE" = "${CLAUDE_MOBILE_IMAGE:-}" ]; then VT_DEFAULT_HOME=$EULER_VIBE_DIR/home/claude-mobile
+else VT_DEFAULT_HOME=$VIBE_TUNNEL_DIR/home/default; fi
+
+VT_CONFIG_DIR=${VT_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibe-tunnel/configs}
+# Legacy: configs saved by euler-vibe's claude-launch are read (never written) too.
+CLAUDE_LAUNCH_CONFIG_DIR=${CLAUDE_LAUNCH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-launch/configs}
+
+VT_CODE_CLI=${VT_CODE_CLI:-$VIBE_TUNNEL_DIR/cli/code}
+[ -x "$VT_CODE_CLI" ] || { [ -x "$HOME/code" ] && VT_CODE_CLI=$HOME/code; } || true
+
+export VIBE_TUNNEL_DIR VT_STATE_DIR VT_LOG_DIR VT_IMAGE VT_SHELLRC VT_DEFAULT_HOME VT_CONFIG_DIR CLAUDE_LAUNCH_CONFIG_DIR VT_CODE_CLI EULER_VIBE_DIR
+
+# --- config files ------------------------------------------------------------------
+# Only the keys we (or claude-launch) write are allowed, so a config file stays
+# data rather than arbitrary code that sourcing would execute.
+config_is_valid() {
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|'#'*) ;;
+            WORKSPACE=*|MODE=*|CLAUDE_MOBILE_HOME=*|'RW_BINDS=('*|'RO_BINDS=('*|PROFILE=*|LABEL=*) ;;
+            *) return 1 ;;
+        esac
+    done < "$1"
+}
+
+# Per-run settings file written by the CLI for the job/run script.
+env_is_valid() {
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|'#'*) ;;
+            VT_TUNNEL_NAME=*|VT_CONFIG=*|VT_CONFIG_FILE=*|VT_WORKSPACE=*|VT_HOME=*|VT_EXTENSIONS=*|'VT_RW_BINDS=('*|'VT_RO_BINDS=('*) ;;
+            *) return 1 ;;
+        esac
+    done < "$1"
+}
+
+config_field() {  # config_field FILE VAR
+    ( set +eu; . "$1" >/dev/null 2>&1; printf '%s' "${!2:-}" )
+}
+
+# Path of a saved config by name: own dir first, then claude-launch's.
+find_config() {
+    local n=$1 d
+    for d in "$VT_CONFIG_DIR" "$CLAUDE_LAUNCH_CONFIG_DIR"; do
+        [ -f "$d/$n.conf" ] && { printf '%s' "$d/$n.conf"; return; }
+    done
+    return 1
+}
+
+# --- sandbox resolution ------------------------------------------------------------
+# Input: VT_CONFIG_FILE (optional) and VT_WORKSPACE/VT_HOME/VT_RW_BINDS/VT_RO_BINDS
+# overrides. Output: WORKSPACE, CLAUDE_MOBILE_HOME, RW_BINDS, RO_BINDS (arrays).
+vt_resolve_sandbox() {
+    WORKSPACE= CLAUDE_MOBILE_HOME= RW_BINDS=() RO_BINDS=() MODE= PROFILE= LABEL=
+    if [ -n "${VT_CONFIG_FILE:-}" ]; then
+        [ -f "$VT_CONFIG_FILE" ] || { echo "config file not found: $VT_CONFIG_FILE" >&2; return 1; }
+        config_is_valid "$VT_CONFIG_FILE" || { echo "config has unexpected content: $VT_CONFIG_FILE" >&2; return 1; }
+        # shellcheck disable=SC1090
+        . "$VT_CONFIG_FILE"
+    fi
+    WORKSPACE=${VT_WORKSPACE:-${WORKSPACE:-$HOME}}
+    CLAUDE_MOBILE_HOME=${VT_HOME:-${CLAUDE_MOBILE_HOME:-$VT_DEFAULT_HOME}}
+    RW_BINDS+=("${VT_RW_BINDS[@]+"${VT_RW_BINDS[@]}"}")
+    RO_BINDS+=("${VT_RO_BINDS[@]+"${VT_RO_BINDS[@]}"}")
+}
+
+# --- container invocation (mirrors euler-vibe/bin/claude-mobile) -------------------
+# Fills CONTAINER_ARGS for `singularity exec`. Needs WORKSPACE, CLAUDE_MOBILE_HOME,
+# RW_BINDS, RO_BINDS and VT_TMPDIR. Extra --bind/--env can be appended by the caller.
+vt_container_args() {
+    CONTAINER_ARGS=(
+        --nv
+        --cleanenv
+        --containall
+        --home "$CLAUDE_MOBILE_HOME:/home"
+        --bind "$WORKSPACE:/workspace"
+        --bind "$VT_TMPDIR:/tmp"
+        --bind "$VT_ENTRY:/opt/vibe-tunnel/entry:ro"
+        --bind "$VT_SHELLRC:/opt/vibe-tunnel/shellrc:ro"
+    )
+    [ -x "$VT_CODE_CLI" ] && CONTAINER_ARGS+=(--bind "$VT_CODE_CLI:/opt/vibe-tunnel/code:ro")
+    local b
+    for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do CONTAINER_ARGS+=(--bind "$b"); done
+    for b in "${RO_BINDS[@]+"${RO_BINDS[@]}"}"; do
+        case "$b" in
+            *:ro) CONTAINER_ARGS+=(--bind "$b") ;;
+            *:rw) CONTAINER_ARGS+=(--bind "${b%:rw}:ro") ;;
+            *)    CONTAINER_ARGS+=(--bind "$b:ro") ;;
+        esac
+    done
+}
+
+# Forward proxy settings through --cleanenv (both spellings, both prefixes), and
+# make Node honour them. Extra KEY=VALUE pairs are passed into the container too.
+vt_container_env() {
+    local proxy_var upper val kv
+    for proxy_var in http_proxy https_proxy all_proxy no_proxy; do
+        upper=$(printf '%s' "$proxy_var" | tr '[:lower:]' '[:upper:]')
+        val=${!proxy_var:-${!upper:-}}
+        if [ -n "$val" ]; then
+            export "SINGULARITYENV_${proxy_var}=$val" "SINGULARITYENV_${upper}=$val"
+            export "APPTAINERENV_${proxy_var}=$val"   "APPTAINERENV_${upper}=$val"
+        fi
+    done
+    export SINGULARITYENV_NODE_USE_ENV_PROXY=1 APPTAINERENV_NODE_USE_ENV_PROXY=1
+    for kv in "$@"; do export "SINGULARITYENV_$kv" "APPTAINERENV_$kv"; done
+}
+
+vt_singularity() { command -v singularity || command -v apptainer || true; }

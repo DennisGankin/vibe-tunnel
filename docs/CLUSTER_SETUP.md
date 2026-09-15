@@ -2,33 +2,34 @@
 
 Everything in this file has to happen on Euler (login node unless stated). The laptop client assumes it is done.
 
-## 1. euler-vibe with a built image
-
-The lab setup. If you already have it, skip.
+## 1. Install and build
 
 ```bash
-git clone -b claude-launch-fixes https://github.com/jurgjn/euler-vibe.git ~/euler-vibe
-cd ~/euler-vibe
+git clone <this repo> ~/vibe-tunnel        # anywhere; the path is what the laptop client needs as "remote dir"
+cd ~/vibe-tunnel
 module load eth_proxy
-./setup.sh            # builds images/claude-mobile.sif (~680 MB, takes a while), adds bin/ to PATH
+./setup.sh                                 # 1. builds images/vibe-tunnel.sif  2. downloads cli/code  3. writes ~/.vibe-tunnel/env  4. PATH
+vibe-tunnel doctor
 ```
-Building on a login node may hit memory limits; euler-vibe's README suggests `./setup.sh --low-mem` or building in a job. A shared image works too: point `CLAUDE_MOBILE_IMAGE` in `~/.vibe-tunnel/env` at it.
+The build pulls `ubuntu:24.04` and the uv image from ghcr.io/docker.io and Node from nodesource, so it needs
+the proxy. It takes a while (a few minutes) and a few GB of scratch. If `mksquashfs` gets OOM-killed on a
+login node: `./setup.sh --low-mem --force`, or build in an interactive job.
+
+Alternatives to building:
+- `./setup.sh --euler-vibe /path/to/euler-vibe` reuses that checkout's `claude-mobile.sif` **and** its sandbox
+  home `home/claude-mobile` as the default, so existing Claude logins carry over. Saved `claude-launch` configs
+  are read either way.
+- `./setup.sh --image /shared/path/vibe-tunnel.sif` uses an image someone else built (e.g. one per lab).
+
+`setup.sh` also downloads Microsoft's standalone VS Code CLI (`cli-alpine-x64`, static, ~15 MB) into `cli/code`.
+It is the same binary `codeserver_tunnel` used as `$HOME/code`; if that exists, it is used as a fallback.
+
+## 2. Profiles and configs
+
+Adjust `profiles/*.sbatch` for your account/partition. Profiles in `~/.vibe-tunnel/profiles/` take precedence over the repo's.
 
 Sandbox configs are created with `vibe-tunnel launch` -> *Save current config* (configs you saved earlier with
 `claude-launch` are read too). Not required: `--workspace` works without configs.
-
-## 2. vibe-tunnel
-
-```bash
-git clone <this repo> ~/vibe-tunnel        # or anywhere; next to euler-vibe is auto-detected
-cd ~/vibe-tunnel
-module load eth_proxy
-./setup.sh                                 # --euler-vibe DIR if it is not in ../euler-vibe or ~/euler-vibe
-vibe-tunnel doctor
-```
-`setup.sh` downloads Microsoft's standalone VS Code CLI (`cli-alpine-x64`, static, ~15 MB) into `cli/code`. It is the same binary `codeserver_tunnel` uses as `$HOME/code`; if that exists, it is used as a fallback.
-
-Adjust `profiles/*.sbatch` for your account/partition. Profiles in `~/.vibe-tunnel/profiles/` take precedence over the repo's.
 
 ## 3. First tunnel, by hand
 
@@ -49,12 +50,13 @@ Then, on the laptop: `code --folder-uri 'vscode-remote://tunnel+test/workspace'`
 
 ## 4. Things to verify on the first run
 
-Status after the first real run on Euler (2026-09-15, CLI 1.125.1 from `~/code`, image 651 MB):
+Status after the first real run on Euler (2026-09-15, CLI 1.125.1 from `~/code`, euler-vibe's image 651 MB; the standalone `images/vibe-tunnel.def` has not been built on the cluster yet):
 
 - confirmed: tunnel relay reachable from inside the container via the forwarded proxy; `vscode-remote://tunnel+NAME/workspace` opens in desktop VS Code; `~/.bashrc` block and euler-vibe shellrc active in VS Code terminals (`claude` function present); `HOME=/home` with the sandbox state; laptop-side submit / wait / open / reopen (with the earlier Python launcher; the bash client uses the same remote commands).
 - not confirmed: `--install-extension` did not preinstall Claude Code with CLI 1.125.1 (see section 6); `token.json` reuse and `unregister` on stop still to be checked in the log.
 
 Each remaining assumption has a fallback; fix the script if reality differs.
+- to do on the cluster: build `images/vibe-tunnel.sif` once with `./setup.sh --force` (or without `--euler-vibe`) and run one tunnel with it; `%test` in the recipe checks `uv`, `node` and `claude` at build time.
 
 | Assumption | Where | If wrong |
 |---|---|---|
@@ -64,7 +66,7 @@ Each remaining assumption has a fallback; fix the script if reality differs.
 | `code tunnel unregister` on exit frees the tunnel name (accounts are capped at a handful of tunnels) | `bin/vibe-tunnel-entry` | stale tunnels accumulate; clean up with `code tunnel unregister` / the Remote Explorer in VS Code |
 | `--signal=B:TERM@120` reaches the job script and Apptainer forwards TERM into the container | `profiles/*.sbatch`, `bin/vibe-tunnel-job` | the tunnel is killed without unregistering (harmless, see previous row) |
 | `vscode-remote://tunnel+<name>/workspace` opens the tunnel in desktop VS Code | `bin/vibe-tunnel-client` | use the printed `https://vscode.dev/tunnel/...` link and its *Open in VS Code Desktop* button |
-| `--nv` on a non-GPU node only warns | `bin/vibe-tunnel-job` | drop `--nv` for CPU profiles via an env toggle (euler-vibe passes it unconditionally too) |
+| `--nv` on a non-GPU node only warns | `bin/vibe-tunnel-lib` | drop `--nv` for CPU profiles via an env toggle (euler-vibe passes it unconditionally too) |
 
 ## 5. Operational notes
 
@@ -72,7 +74,8 @@ Each remaining assumption has a fallback; fix the script if reality differs.
 - **Concurrency**: one job per label. Each job has its own `--cli-data-dir` (`/home/.vscode-cli/jobs/<jobid>`), which avoids the singleton-lock retries seen in the old `tunnel_output_*.log` files when a data dir was reused across nodes. Dirs older than 7 days are pruned at job start.
 - **Disk**: the VS Code server (~200 MB per VS Code version) and extensions live in `/home/.vscode-server` of the sandbox home, shared by all jobs of that home.
 - **Time limits**: the tunnel dies with the job. VS Code shows a reconnect dialog; start a new job and reopen.
-- **Several homes**: a different `CLAUDE_MOBILE_HOME` means separate Claude login, VS Code login, server cache and `.bashrc`. Choose it per config in `claude-launch` or with `--home`.
+- **Several homes**: a different `CLAUDE_MOBILE_HOME` means separate Claude login, VS Code login, server cache and `.bashrc`. Choose it per config in the launch menu or with `--home`. The default is `home/default` in the repo (gitignored), or euler-vibe's `home/claude-mobile` when its image is reused.
+- **Terminal use without VS Code**: `vibe-tunnel claude|shell [--config N | --workspace D ...]` runs the same container interactively on the current node; use it inside an interactive slurm job.
 - **Cleaning up**: `rm -rf ~/.vibe-tunnel/jobs/*` (settings of past submissions) and old logs are safe to delete any time.
 
 ## 6. Extensions and settings live in the sandbox home
@@ -91,4 +94,4 @@ Then reload the VS Code window. Machine settings can be copied the same way from
 Alternatively add `/cluster/home/$USER/.vscode-server` as a read-write bind mounted at `/home/.vscode-server` in the
 claude-launch config to share it with the host, at the cost of Claude being able to write there.
 
-Prompt note: Apptainer overrides `PS1`, so terminals show `Apptainer>` instead of euler-vibe's `(claude-mobile)`.
+Prompt note: Apptainer may override `PS1`, so VS Code terminals can show `Apptainer>` instead of `(vibe-tunnel)`.

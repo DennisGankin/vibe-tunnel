@@ -2,23 +2,29 @@
 set -uo pipefail
 
 # vibe-tunnel-entry -----------------------------------------------------------
-# Runs INSIDE the euler-vibe container (claude-mobile.sif). Prepares the
-# persistent sandbox home so VS Code terminals and the Claude Code extension
-# find a working, self-updating `claude`, then runs `code tunnel` here so the
-# VS Code server (and everything it spawns) lives inside the sandbox.
+# Runs INSIDE the container. Prepares the persistent sandbox home so shells and
+# the Claude Code extension find a working, self-updating `claude`, then either
+# runs `code tunnel` here (mode tunnel: the VS Code server and everything it
+# spawns lives inside the sandbox) or drops into Claude / a shell (interactive).
 #
 # Bound in by vibe-tunnel-job:
-#   /opt/vibe-tunnel/code     static VS Code CLI (alpine build)
-#   /opt/vibe-tunnel/shellrc  euler-vibe's claude-mobile-shellrc (optional)
-#   /home                     persistent sandbox home, /workspace, /tmp (per job)
-# Environment: VT_TUNNEL_NAME VT_JOB_ID VT_EXTENSIONS VT_HOST_WORKSPACE VT_HOST_NODE
+#   /opt/vibe-tunnel/code     static VS Code CLI (alpine build; tunnel mode)
+#   /opt/vibe-tunnel/shellrc  bin/vibe-tunnel-shellrc
+#   /home                     persistent sandbox home, /workspace, /tmp (per run)
+# Environment: VT_MODE VT_TUNNEL_NAME VT_JOB_ID VT_EXTENSIONS VT_HOST_WORKSPACE VT_HOST_NODE
+# Arguments: passed to claude (mode claude).
 
-log() { printf '[%s] vibe-tunnel: %s\n' "$(date '+%H:%M:%S')" "$*"; }
+MODE=${VT_MODE:-tunnel}
+log() {
+    if [ "$MODE" = tunnel ]; then printf '[%s] vibe-tunnel: %s\n' "$(date '+%H:%M:%S')" "$*"
+    else printf 'vibe-tunnel: %s\n' "$*" >&2; fi
+}
 
 export HOME=/home
 cd /workspace 2>/dev/null || cd /
 export PATH="$HOME/.local/bin:$PATH"
 TUNNEL_NAME=${VT_TUNNEL_NAME:-vibe-${VT_JOB_ID:-$$}}
+SHELLRC=/opt/vibe-tunnel/shellrc
 
 # --- 1. shell setup for VS Code terminals ------------------------------------
 # claude-mobile starts bash with --rcfile; VS Code's integrated terminal starts a
@@ -28,7 +34,7 @@ BEGIN='# >>> vibe-tunnel >>>'; END='# <<< vibe-tunnel <<<'
 if ! grep -qsF "$BEGIN" "$HOME/.bashrc"; then
     {
         printf '\n%s\n' "$BEGIN"
-        printf '# Added by vibe-tunnel: euler-vibe shell helpers (claude on PATH, self-update bootstrap).\n'
+        printf '# Added by vibe-tunnel: shell helpers (claude on PATH, self-update bootstrap).\n'
         printf '[ -f /opt/vibe-tunnel/shellrc ] && . /opt/vibe-tunnel/shellrc\n'
         printf 'export PATH="$HOME/.local/bin:$PATH"\n'
         printf '%s\n' "$END"
@@ -46,6 +52,23 @@ if [ ! -x "$HOME/.local/bin/claude" ] && command -v claude >/dev/null 2>&1; then
     hash -r
 fi
 log "claude: $(command -v claude 2>/dev/null || echo not-found) $(claude --version 2>/dev/null | head -n1)"
+
+# --- interactive modes ---------------------------------------------------------
+case "$MODE" in
+    shell)
+        exec bash --rcfile "$SHELLRC" -i ;;
+    claude)
+        # Claude in the workspace; when it exits, stay in the container shell.
+        exec bash --rcfile "$SHELLRC" -ic '
+            cd /workspace 2>/dev/null || true
+            claude "$@"
+            status=$?
+            echo
+            if [ "$status" -eq 130 ]; then echo "claude interrupted. Staying in the container shell."
+            elif [ "$status" -ne 0 ]; then echo "claude exited with status $status. Staying in the container shell."; fi
+            exec bash --rcfile '"$SHELLRC"' -i
+        ' bash "$@" ;;
+esac
 
 # --- 3. VS Code CLI ------------------------------------------------------------
 # Work from a writable per-job copy so the CLI's own self-update can succeed

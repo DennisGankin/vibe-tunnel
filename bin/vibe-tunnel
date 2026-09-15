@@ -11,6 +11,8 @@ set -euo pipefail
 #                              [--workspace DIR] [--home DIR]
 #                              [--rw DIR[:DEST]]... [--ro DIR[:DEST]]...
 #                              [--extensions ID,ID] [--json]
+#   vibe-tunnel claude [sandbox opts] [-- CLAUDE_ARGS]   Claude Code in the container, right here
+#   vibe-tunnel shell  [sandbox opts]                    a shell in the container, right here
 #   vibe-tunnel wait JOBID                block until the tunnel link appears, print it
 #   vibe-tunnel status [--porcelain]      running tunnels + their links
 #   vibe-tunnel show JOBID                state, node and the full log (machine-readable)
@@ -35,27 +37,9 @@ if [ -z "${VT_ON_CLUSTER:-}" ] && ! command -v sbatch >/dev/null 2>&1; then
     exec "$VIBE_TUNNEL_DIR/bin/vibe-tunnel-client" "$@"
 fi
 
-VT_STATE_DIR=${VT_STATE_DIR:-$HOME/.vibe-tunnel}
-VT_LOG_DIR=$VT_STATE_DIR/logs
-VT_JOB_DIR=$VT_STATE_DIR/jobs
-VT_USER_PROFILES=$VT_STATE_DIR/profiles
-VT_ENV=$VT_STATE_DIR/env
+# shellcheck disable=SC1091
+. "$VIBE_TUNNEL_DIR/bin/vibe-tunnel-lib"
 JOB_PREFIX=vibe-tunnel
-
-# Site settings written by setup.sh (EULER_VIBE_DIR, CLAUDE_MOBILE_IMAGE, VT_CODE_CLI ...).
-# shellcheck disable=SC1090
-[ -f "$VT_ENV" ] && . "$VT_ENV"
-
-EULER_VIBE_DIR=${EULER_VIBE_DIR:-$(dirname "$VIBE_TUNNEL_DIR")/euler-vibe}
-[ -d "$EULER_VIBE_DIR" ] || EULER_VIBE_DIR=$HOME/euler-vibe
-CLAUDE_MOBILE_IMAGE=${CLAUDE_MOBILE_IMAGE:-$EULER_VIBE_DIR/images/claude-mobile.sif}
-VT_CONFIG_DIR=${VT_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibe-tunnel/configs}
-# Legacy: configs saved by euler-vibe's claude-launch are read (never written) too.
-CLAUDE_LAUNCH_CONFIG_DIR=${CLAUDE_LAUNCH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-launch/configs}
-VT_CODE_CLI=${VT_CODE_CLI:-$VIBE_TUNNEL_DIR/cli/code}
-[ -x "$VT_CODE_CLI" ] || { [ -x "$HOME/code" ] && VT_CODE_CLI=$HOME/code; } || true
-VT_DEFAULT_HOME=${VT_DEFAULT_HOME:-$EULER_VIBE_DIR/home/claude-mobile}
-export VT_DEFAULT_HOME EULER_VIBE_DIR CLAUDE_MOBILE_IMAGE VT_CONFIG_DIR CLAUDE_LAUNCH_CONFIG_DIR VT_CODE_CLI VT_STATE_DIR VT_LOG_DIR
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
     BOLD=$'\033[1m'; DIM=$'\033[2m'; RST=$'\033[0m'
@@ -67,7 +51,7 @@ ok()   { printf '  %s✓%s %s\n' "$GREEN" "$RST" "$*"; }
 warn() { printf '  %s!%s %s\n' "$YELLOW" "$RST" "$*"; }
 die()  { printf '%svibe-tunnel: %s%s\n' "$RED" "$*" "$RST" >&2; exit 1; }
 
-usage() { sed -n '4,26p' "$VT_BIN" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,28p' "$VT_BIN" | sed 's/^# \{0,1\}//'; }
 
 # --- helpers ---------------------------------------------------------------
 
@@ -107,32 +91,6 @@ profile_summary() {
     ' "$1" | sed 's/ $//'
 }
 
-# Only the keys we (or claude-launch) write are allowed, so a config file stays
-# data rather than arbitrary code that sourcing would execute.
-config_is_valid() {
-    local line
-    while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in
-            ''|'#'*) ;;
-            WORKSPACE=*|MODE=*|CLAUDE_MOBILE_HOME=*|'RW_BINDS=('*|'RO_BINDS=('*|PROFILE=*|LABEL=*) ;;
-            *) return 1 ;;
-        esac
-    done < "$1"
-}
-
-config_field() {  # config_field FILE VAR
-    ( set +eu; . "$1" >/dev/null 2>&1; printf '%s' "${!2:-}" )
-}
-
-# Path of a saved config by name: own dir first, then claude-launch's.
-find_config() {
-    local n=$1 d
-    for d in "$VT_CONFIG_DIR" "$CLAUDE_LAUNCH_CONFIG_DIR"; do
-        [ -f "$d/$n.conf" ] && { printf '%s' "$d/$n.conf"; return; }
-    done
-    return 1
-}
-
 # All of the user's vibe-tunnel jobs: id|name|state|node|elapsed|timeleft
 squeue_jobs() {
     { squeue -u "$USER" -h -o '%i|%j|%T|%N|%M|%L' 2>/dev/null | awk -F'|' -v p="$JOB_PREFIX" 'index($2, p) == 1'; } || true
@@ -144,46 +102,73 @@ log_link()   { { grep -Eo 'Open this link in your browser[[:space:]]+https?://[^
 log_tunnel() { { grep -Eo '^VT_TUNNEL_NAME=.*' "$1" 2>/dev/null | tail -n1 | cut -d= -f2; } || true; }
 log_device() { { grep -Eo 'log into[[:space:]]+https?://[^[:space:]]+[[:space:]]+and use code[[:space:]]+[A-Za-z0-9-]+' "$1" 2>/dev/null | tail -n1 | awk '{print $3 " " $NF}'; } || true; }
 
-# --- submit -----------------------------------------------------------------
-cmd_submit() {
-    local profile= label= config= workspace= home_dir= json=0
-    local extensions=${VT_EXTENSIONS-anthropic.claude-code}
-    local rw=() ro=()
+# --- sandbox options (shared by submit / claude / shell) --------------------
+OPT_PROFILE= OPT_LABEL= OPT_CONFIG= OPT_WORKSPACE= OPT_HOME= OPT_JSON=0 OPT_CF=
+OPT_EXTENSIONS=${VT_EXTENSIONS-anthropic.claude-code}
+OPT_RW=() OPT_RO=() OPT_REST=()
+parse_sandbox_opts() {
     while [ $# -gt 0 ]; do
         case "$1" in
-            --name)       label=$2; shift ;;
-            --config)     config=$2; shift ;;
-            --workspace)  workspace=$2; shift ;;
-            --home)       home_dir=$2; shift ;;
-            --rw)         rw+=("$2"); shift ;;
-            --ro)         ro+=("$2"); shift ;;
-            --extensions) extensions=$2; shift ;;
-            --json)       json=1 ;;
+            --name)       OPT_LABEL=$2; shift ;;
+            --config)     OPT_CONFIG=$2; shift ;;
+            --workspace)  OPT_WORKSPACE=$2; shift ;;
+            --home)       OPT_HOME=$2; shift ;;
+            --rw)         OPT_RW+=("$2"); shift ;;
+            --ro)         OPT_RO+=("$2"); shift ;;
+            --extensions) OPT_EXTENSIONS=$2; shift ;;
+            --json)       OPT_JSON=1 ;;
+            --)           shift; OPT_REST=("$@"); break ;;
             -h|--help)    usage; exit 0 ;;
             -*)           die "unknown option: $1" ;;
-            *)            [ -z "$profile" ] || die "unexpected argument: $1"; profile=$1 ;;
+            *)            [ -z "$OPT_PROFILE" ] || die "unexpected argument: $1"; OPT_PROFILE=$1 ;;
         esac
         shift
     done
-    local cf=
-    if [ -n "$config" ]; then
-        cf=$(find_config "$config") || die "config not found: $config (see: vibe-tunnel configs)"
-        config_is_valid "$cf" || die "config has unexpected content, refusing to use it: $cf"
+    if [ -n "$OPT_CONFIG" ]; then
+        OPT_CF=$(find_config "$OPT_CONFIG") || die "config not found: $OPT_CONFIG (see: vibe-tunnel configs)"
+        config_is_valid "$OPT_CF" || die "config has unexpected content, refusing to use it: $OPT_CF"
+    fi
+    if [ -n "$OPT_WORKSPACE" ]; then
+        [ -d "$OPT_WORKSPACE" ] || die "workspace is not a directory: $OPT_WORKSPACE"
+        OPT_WORKSPACE=$(realpath -- "$OPT_WORKSPACE")
+    fi
+    [ -z "$OPT_HOME" ] || OPT_HOME=$(abspath "$OPT_HOME")
+    [ -e "$VT_IMAGE" ] || die "container image missing: $VT_IMAGE (run ./setup.sh to build it)"
+}
+
+# Per-run settings file for bin/vibe-tunnel-job. Prints its path.
+write_env_file() {
+    local tunnel_name=$1 stamp f b
+    mkdir -p "$VT_LOG_DIR" "$VT_JOB_DIR" "$VT_USER_PROFILES"
+    stamp=$(date +%Y%m%d-%H%M%S)-$$
+    f=$VT_JOB_DIR/$stamp.env
+    {
+        printf '# vibe-tunnel run settings, written %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+        printf 'VT_TUNNEL_NAME=%q\n' "$tunnel_name"
+        printf 'VT_CONFIG=%q\n' "$OPT_CONFIG"
+        printf 'VT_CONFIG_FILE=%q\n' "$OPT_CF"
+        printf 'VT_WORKSPACE=%q\n' "$OPT_WORKSPACE"
+        printf 'VT_HOME=%q\n' "$OPT_HOME"
+        printf 'VT_EXTENSIONS=%q\n' "$OPT_EXTENSIONS"
+        printf 'VT_RW_BINDS=('; for b in "${OPT_RW[@]+"${OPT_RW[@]}"}"; do printf ' %q' "$b"; done; printf ' )\n'
+        printf 'VT_RO_BINDS=('; for b in "${OPT_RO[@]+"${OPT_RO[@]}"}"; do printf ' %q' "$b"; done; printf ' )\n'
+    } > "$f"
+    printf '%s' "$f"
+}
+
+# --- submit -----------------------------------------------------------------
+cmd_submit() {
+    parse_sandbox_opts "$@"
+    local profile=$OPT_PROFILE label=$OPT_LABEL
+    if [ -n "$OPT_CF" ]; then
         # A saved config may carry its resources and label; explicit flags win.
-        [ -n "$profile" ] || profile=$(config_field "$cf" PROFILE)
-        [ -n "$label" ]   || label=$(config_field "$cf" LABEL)
+        [ -n "$profile" ] || profile=$(config_field "$OPT_CF" PROFILE)
+        [ -n "$label" ]   || label=$(config_field "$OPT_CF" LABEL)
     fi
     [ -n "$profile" ] || die "submit needs a PROFILE (see: vibe-tunnel profiles)"
     local profile_path
     profile_path=$(resolve_profile "$profile") || die "profile not found: $profile"
-
-    [ -e "$CLAUDE_MOBILE_IMAGE" ] || die "container image missing: $CLAUDE_MOBILE_IMAGE (build euler-vibe first, see docs/CLUSTER_SETUP.md)"
     [ -x "$VT_CODE_CLI" ] || die "VS Code CLI missing: $VT_CODE_CLI (run ./setup.sh)"
-    if [ -n "$workspace" ]; then
-        [ -d "$workspace" ] || die "workspace is not a directory: $workspace"
-        workspace=$(realpath -- "$workspace")
-    fi
-    [ -z "$home_dir" ] || home_dir=$(abspath "$home_dir")
 
     local tunnel_name= job_name=$JOB_PREFIX
     if [ -n "$label" ]; then
@@ -197,45 +182,40 @@ cmd_submit() {
         fi
     fi
 
-    mkdir -p "$VT_LOG_DIR" "$VT_JOB_DIR" "$VT_USER_PROFILES"
-    local stamp env_file b
-    stamp=$(date +%Y%m%d-%H%M%S)-$$
-    env_file=$VT_JOB_DIR/$stamp.env
-    {
-        printf '# vibe-tunnel job settings, written %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-        printf 'VT_TUNNEL_NAME=%q\n' "$tunnel_name"
-        printf 'VT_CONFIG=%q\n' "$config"
-        printf 'VT_CONFIG_FILE=%q\n' "$cf"
-        printf 'VT_WORKSPACE=%q\n' "$workspace"
-        printf 'VT_HOME=%q\n' "$home_dir"
-        printf 'VT_EXTENSIONS=%q\n' "$extensions"
-        printf 'VT_RW_BINDS=('; for b in "${rw[@]+"${rw[@]}"}"; do printf ' %q' "$b"; done; printf ' )\n'
-        printf 'VT_RO_BINDS=('; for b in "${ro[@]+"${ro[@]}"}"; do printf ' %q' "$b"; done; printf ' )\n'
-    } > "$env_file"
-
+    local env_file out job_id
+    env_file=$(write_env_file "$tunnel_name")
     # --export must keep ALL, otherwise sbatch stops exporting the rest of the
     # submission environment (modules, proxy, ...). Values contain no commas.
-    local out job_id
     out=$(sbatch --parsable \
         --job-name="$job_name" \
         --output="$VT_LOG_DIR/%j.log" \
-        --export="ALL,VIBE_TUNNEL_DIR=$VIBE_TUNNEL_DIR,VT_ENV_FILE=$env_file,VT_STATE_DIR=$VT_STATE_DIR" \
+        --export="ALL,VIBE_TUNNEL_DIR=$VIBE_TUNNEL_DIR,VT_ENV_FILE=$env_file,VT_STATE_DIR=$VT_STATE_DIR,VT_MODE=tunnel" \
         "$profile_path") || die "sbatch failed"
     job_id=${out%%;*}
     [ -n "$job_id" ] || die "could not read the job id from sbatch output: $out"
     printf '%s %s %s\n' "$job_id" "$job_name" "$tunnel_name" > "$VT_STATE_DIR/last-job"
 
-    if [ "$json" -eq 1 ]; then
+    if [ "$OPT_JSON" -eq 1 ]; then
         printf '{"job_id":"%s","job_name":"%s","tunnel_name":"%s","log":"%s","profile":"%s","config":"%s"}\n' \
-            "$job_id" "$job_name" "$tunnel_name" "$VT_LOG_DIR/$job_id.log" "$profile_path" "$config"
+            "$job_id" "$job_name" "$tunnel_name" "$VT_LOG_DIR/$job_id.log" "$profile_path" "$OPT_CONFIG"
     else
         printf 'Submitted job %s%s%s (%s)\n' "$BOLD" "$job_id" "$RST" "$job_name"
         printf '  profile : %s\n' "$profile_path"
-        [ -z "$config" ]    || printf '  config  : %s\n' "$config"
-        [ -z "$workspace" ] || printf '  workspace: %s\n' "$workspace"
+        [ -z "$OPT_CONFIG" ]    || printf '  config  : %s\n' "$OPT_CONFIG"
+        [ -z "$OPT_WORKSPACE" ] || printf '  workspace: %s\n' "$OPT_WORKSPACE"
         printf '  log     : %s\n' "$VT_LOG_DIR/$job_id.log"
         printf '\nFollow it with:  %svibe-tunnel logs %s -f%s\n' "$CYAN" "$job_id" "$RST"
     fi
+}
+
+# --- claude / shell: run the container interactively, here ------------------
+cmd_run() {
+    local mode=$1; shift
+    parse_sandbox_opts "$@"
+    local env_file
+    env_file=$(write_env_file "")
+    [ -n "${SLURM_JOB_ID:-}" ] || warn "not inside a slurm job: this runs on $(hostname -s). For real work use an interactive job (srun ... --pty bash) first."
+    VT_ENV_FILE=$env_file VT_MODE=$mode exec "$VIBE_TUNNEL_DIR/bin/vibe-tunnel-job" "${OPT_REST[@]+"${OPT_REST[@]}"}"
 }
 
 # --- status / show / logs / stop -------------------------------------------
@@ -405,21 +385,25 @@ cmd_profiles() {
 cmd_doctor() {
     printf '%s== vibe-tunnel doctor ==%s\n' "$BOLD" "$RST"
     echo "  repo:        $VIBE_TUNNEL_DIR"
-    echo "  euler-vibe:  $EULER_VIBE_DIR"
     echo "  state dir:   $VT_STATE_DIR"
+    echo "  configs:     $VT_CONFIG_DIR"
     echo
-    [ -d "$EULER_VIBE_DIR" ] && ok "euler-vibe checkout found" || warn "euler-vibe not found; set EULER_VIBE_DIR in $VT_ENV"
-    [ -e "$CLAUDE_MOBILE_IMAGE" ] && ok "image: $CLAUDE_MOBILE_IMAGE ($(du -h "$CLAUDE_MOBILE_IMAGE" | cut -f1))" || warn "image missing: $CLAUDE_MOBILE_IMAGE  (cd $EULER_VIBE_DIR && ./setup.sh)"
-    [ -f "$EULER_VIBE_DIR/bin/claude-mobile-shellrc" ] && ok "shellrc: $EULER_VIBE_DIR/bin/claude-mobile-shellrc" || warn "claude-mobile-shellrc missing (container terminals will lack the claude helpers)"
+    if [ -e "$VT_IMAGE" ]; then
+        ok "image: $VT_IMAGE ($(du -h "$VT_IMAGE" | cut -f1))"
+        [ "$VT_IMAGE" != "${CLAUDE_MOBILE_IMAGE:-}" ] || warn "that is euler-vibe's image (fallback); build vibe-tunnel's own with ./setup.sh"
+    
+    else warn "image missing: $VT_IMAGE  (cd $VIBE_TUNNEL_DIR && module load eth_proxy && ./setup.sh)"; fi
+    [ -f "$VT_SHELLRC" ] && ok "shellrc: $VT_SHELLRC" || warn "shellrc missing: $VT_SHELLRC"
+    ok "default sandbox home: $VT_DEFAULT_HOME"
+    [ -z "$EULER_VIBE_DIR" ] || ok "euler-vibe (optional): $EULER_VIBE_DIR"
     if [ -x "$VT_CODE_CLI" ]; then ok "VS Code CLI: $VT_CODE_CLI ($("$VT_CODE_CLI" --version 2>/dev/null | head -n1))"
     else warn "VS Code CLI missing: $VT_CODE_CLI  (run ./setup.sh)"; fi
-    command -v singularity >/dev/null 2>&1 || command -v apptainer >/dev/null 2>&1 \
-        && ok "singularity/apptainer on PATH" || warn "singularity/apptainer not on PATH (fine on a login node; jobs load it)"
+    [ -n "$(vt_singularity)" ] && ok "singularity/apptainer on PATH" || warn "singularity/apptainer not on PATH (fine on a login node; jobs load it)"
     command -v sbatch >/dev/null 2>&1 && ok "slurm (sbatch) available" || warn "sbatch not found"
     if [ -n "${http_proxy:-}${HTTP_PROXY:-}" ]; then ok "proxy set: ${http_proxy:-$HTTP_PROXY}"
     else warn "no http_proxy in this shell (jobs run 'module load eth_proxy' themselves)"; fi
     local n m; n=$(ls "$VT_CONFIG_DIR"/*.conf 2>/dev/null | wc -l | tr -d ' '); m=$(ls "$CLAUDE_LAUNCH_CONFIG_DIR"/*.conf 2>/dev/null | wc -l | tr -d ' ')
-    ok "saved configs: $n in $VT_CONFIG_DIR, $m from claude-launch"
+    ok "saved configs: $n own, $m from claude-launch"
     echo
     cmd_profiles
 }
@@ -429,6 +413,8 @@ cmd=${1:-}; [ $# -gt 0 ] && shift
 case "$cmd" in
     launch)   cmd_launch "$@" ;;
     submit)   cmd_submit "$@" ;;
+    claude)   cmd_run claude "$@" ;;
+    shell)    cmd_run shell "$@" ;;
     wait)     cmd_wait "$@" ;;
     status)   cmd_status "$@" ;;
     show)     cmd_show "$@" ;;

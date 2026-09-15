@@ -3,11 +3,12 @@ set -euo pipefail
 
 # setup.sh --------------------------------------------------------------------
 # On the cluster:
-#   1. locate your euler-vibe checkout and its built claude-mobile.sif
+#   1. build the container image images/vibe-tunnel.sif (or point at an
+#      existing image: --image FILE, or --euler-vibe DIR to reuse claude-mobile.sif)
 #   2. download Microsoft's standalone VS Code CLI into cli/code
 #   3. write site settings to ~/.vibe-tunnel/env
 #   4. optionally put bin/ on your PATH
-# Safe to re-run. Needs the proxy for the download: `module load eth_proxy`.
+# Safe to re-run. Needs the proxy for downloads and the build: `module load eth_proxy`.
 #
 # On your laptop (no slurm here), `./setup.sh --client` instead puts bin/ on
 # your PATH and writes the client settings (ssh host, cluster path of this
@@ -17,10 +18,12 @@ REPO=$(cd "$(dirname "$(realpath "$0")")" && pwd)
 STATE_DIR=${VT_STATE_DIR:-$HOME/.vibe-tunnel}
 ENV_FILE=$STATE_DIR/env
 CLI=$REPO/cli/code
+IMAGE=${VT_IMAGE:-$REPO/images/vibe-tunnel.sif}
+DEF_REL=images/vibe-tunnel.def
 BEGIN_MARK='# >>> vibe-tunnel >>>'
 END_MARK='# <<< vibe-tunnel <<<'
 RC_FILE=${RC_FILE:-$HOME/.bashrc}
-DO_CLI=1 DO_PATH=1 FORCE=0 YES=0 CLIENT=0
+DO_CLI=1 DO_PATH=1 DO_BUILD=1 FORCE=0 YES=0 CLIENT=0 LOW_MEM=0
 EULER_VIBE_DIR=${EULER_VIBE_DIR:-}
 CLIENT_ARGS=()
 
@@ -43,10 +46,13 @@ usage() {
     cat <<USAGE
 Usage: ./setup.sh [options]                 (on the cluster)
        ./setup.sh --client [--host H] [--remote-dir DIR] [--open-with code|browser|none]   (on your laptop)
-  --euler-vibe DIR   path to the euler-vibe checkout (default: ../euler-vibe or ~/euler-vibe)
+  --image FILE       use this container image instead of building images/vibe-tunnel.sif
+  --euler-vibe DIR   reuse the claude-mobile.sif (and sandbox home) of an euler-vibe checkout
+  --no-build         skip building the image
+  --low-mem          cap mksquashfs resources (use if the build gets OOM-killed)
   --no-cli           skip downloading the VS Code CLI
   --no-path          skip adding bin/ to your shell rc
-  --force            re-download the CLI / rewrite the PATH block
+  --force            rebuild the image, re-download the CLI, rewrite the PATH block
   --rc FILE          shell rc file to edit (default: ~/.bashrc)
   -y, --yes          do not prompt
 USAGE
@@ -56,6 +62,9 @@ while [ $# -gt 0 ]; do
         --client)  CLIENT=1 ;;
         --host|--remote-dir|--open-with) CLIENT_ARGS+=("$1" "$2"); shift ;;
         --euler-vibe) shift; EULER_VIBE_DIR=$1 ;;
+        --image)   shift; IMAGE=$1 ;;
+        --no-build) DO_BUILD=0 ;;
+        --low-mem) LOW_MEM=1 ;;
         --no-cli)  DO_CLI=0 ;;
         --no-path) DO_PATH=0 ;;
         --force)   FORCE=1 ;;
@@ -100,24 +109,47 @@ if [ "$CLIENT" -eq 1 ] || { ! command -v sbatch >/dev/null 2>&1 && [ -z "${VT_ON
     exit 0
 fi
 
-# --- 1. euler-vibe -----------------------------------------------------------
-step "euler-vibe"
-if [ -z "$EULER_VIBE_DIR" ]; then
-    for c in "$(dirname "$REPO")/euler-vibe" "$HOME/euler-vibe"; do
-        [ -d "$c" ] && { EULER_VIBE_DIR=$c; break; }
-    done
+# --- 1. container image -----------------------------------------------------------
+step "Container image"
+if [ -n "$EULER_VIBE_DIR" ]; then
+    EULER_VIBE_DIR=$(realpath "$EULER_VIBE_DIR")
+    [ -d "$EULER_VIBE_DIR" ] || die "euler-vibe checkout not found: $EULER_VIBE_DIR"
+    CLAUDE_MOBILE_IMAGE=$EULER_VIBE_DIR/images/claude-mobile.sif
+    if [ -e "$CLAUDE_MOBILE_IMAGE" ]; then
+        ok "reusing euler-vibe's image: $CLAUDE_MOBILE_IMAGE ($(du -h "$CLAUDE_MOBILE_IMAGE" | cut -f1))"
+        say "  ${DIM}(the default sandbox home stays $EULER_VIBE_DIR/home/claude-mobile, so existing logins carry over)${RST}"
+        DO_BUILD=0
+    else
+        warn "no built image in $EULER_VIBE_DIR; building vibe-tunnel's own instead"
+    fi
 fi
-[ -n "$EULER_VIBE_DIR" ] && [ -d "$EULER_VIBE_DIR" ] \
-    || die "euler-vibe not found. Clone it next to this repo (git clone https://github.com/jurgjn/euler-vibe.git) or pass --euler-vibe DIR"
-EULER_VIBE_DIR=$(realpath "$EULER_VIBE_DIR")
-ok "checkout: $EULER_VIBE_DIR"
-IMAGE=${CLAUDE_MOBILE_IMAGE:-$EULER_VIBE_DIR/images/claude-mobile.sif}
-if [ -e "$IMAGE" ]; then ok "image: $IMAGE ($(du -h "$IMAGE" | cut -f1))"
+if [ "$DO_BUILD" -eq 0 ]; then
+    if [ -e "$IMAGE" ]; then ok "image: $IMAGE ($(du -h "$IMAGE" | cut -f1))"
+    elif [ -z "${CLAUDE_MOBILE_IMAGE:-}" ] || [ ! -e "$CLAUDE_MOBILE_IMAGE" ]; then warn "no image at $IMAGE (--no-build); nothing can launch until one exists"; fi
+elif [ -e "$IMAGE" ] && [ "$FORCE" -eq 0 ]; then
+    ok "already present: $IMAGE ($(du -h "$IMAGE" | cut -f1)) — use --force to rebuild"
 else
-    warn "image not built yet: $IMAGE"
-    warn "build it with:  cd $EULER_VIBE_DIR && module load eth_proxy && ./setup.sh"
+    SINGULARITY=$(command -v singularity || command -v apptainer || true)
+    [ -n "$SINGULARITY" ] || die "neither singularity nor apptainer found on PATH"
+    [ -e "$REPO/$DEF_REL" ] || die "build recipe missing: $REPO/$DEF_REL"
+    # The image pulls base layers from ghcr.io/docker.io, which needs the cluster proxy.
+    if [ -z "${http_proxy:-}${HTTP_PROXY:-}" ]; then
+        warn "no http_proxy set — on Euler run 'module load eth_proxy' first,"
+        warn "otherwise the build cannot reach ghcr.io / docker.io / deb.nodesource.com"
+        confirm "Continue anyway?" || die "aborted"
+    fi
+    mkdir -p "$(dirname "$IMAGE")"
+    args=()
+    if [ "$LOW_MEM" -eq 1 ]; then
+        args+=(--mksquashfs-args "-processors 4 -mem 2048M")
+        say "  ${DIM}using capped mksquashfs resources${RST}"
+    fi
+    say "  ${DIM}building $IMAGE — takes a while and needs a few GB of scratch${RST}"
+    ( cd "$REPO" && "$SINGULARITY" build "${args[@]+"${args[@]}"}" "$IMAGE" "$DEF_REL" ) \
+        || die "build failed. If mksquashfs was killed, retry with: ./setup.sh --low-mem --force"
+    [ -e "$IMAGE" ] || die "build reported success but $IMAGE does not exist"
+    ok "built $IMAGE ($(du -h "$IMAGE" | cut -f1))"
 fi
-[ -f "$EULER_VIBE_DIR/bin/claude-mobile-shellrc" ] && ok "shellrc found" || warn "bin/claude-mobile-shellrc missing in euler-vibe (terminals will lack the claude helpers)"
 
 # --- 2. VS Code CLI ------------------------------------------------------------
 step "VS Code CLI"
@@ -149,11 +181,11 @@ fi
 step "Site settings"
 mkdir -p "$STATE_DIR/profiles" "$STATE_DIR/logs" "$STATE_DIR/jobs"
 {
-    printf '# vibe-tunnel site settings (written by setup.sh %s). Sourced by bin/vibe-tunnel and the job.\n' "$(date '+%Y-%m-%d')"
-    printf 'EULER_VIBE_DIR=%q\n' "$EULER_VIBE_DIR"
-    printf '# CLAUDE_MOBILE_IMAGE=%q\n' "$IMAGE"
+    printf '# vibe-tunnel site settings (written by setup.sh %s). Sourced by bin/vibe-tunnel-lib.\n' "$(date '+%Y-%m-%d')"
+    if [ "$IMAGE" != "$REPO/images/vibe-tunnel.sif" ]; then printf 'VT_IMAGE=%q\n' "$IMAGE"; else printf '# VT_IMAGE=%q\n' "$IMAGE"; fi
+    if [ -n "$EULER_VIBE_DIR" ]; then printf 'EULER_VIBE_DIR=%q\n' "$EULER_VIBE_DIR"; else printf '# EULER_VIBE_DIR=/path/to/euler-vibe   # optional: reuse its image + sandbox home\n'; fi
     printf '# VT_CODE_CLI=%q\n' "$CLI"
-    printf '# CLAUDE_LAUNCH_CONFIG_DIR=%q\n' "${XDG_CONFIG_HOME:-$HOME/.config}/claude-launch/configs"
+    printf '# VT_DEFAULT_HOME=%q\n' "$REPO/home/default"
 } > "$ENV_FILE"
 ok "wrote $ENV_FILE"
 say "  ${DIM}your own sbatch profiles go in $STATE_DIR/profiles/NAME.sbatch${RST}"

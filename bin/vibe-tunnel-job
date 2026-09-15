@@ -2,151 +2,91 @@
 set -euo pipefail
 
 # vibe-tunnel-job -------------------------------------------------------------
-# Runs on the compute node, on the host side of the slurm job. It resolves the
-# sandbox (workspace, persistent home, extra binds) from a claude-launch config
-# and/or the job's env file, mirrors euler-vibe's claude-mobile mount + proxy
-# setup, and starts the container with bin/vibe-tunnel-entry as its command.
-# Everything it prints lands in the slurm log (~/.vibe-tunnel/logs/<jobid>.log),
-# which the launcher polls for the VS Code tunnel link.
+# Host side of a run: resolves the sandbox (workspace, persistent home, extra
+# binds) from a saved config and/or the run's env file, assembles the container
+# invocation (bin/vibe-tunnel-lib) and starts bin/vibe-tunnel-entry inside it.
 #
-# Inputs (all via environment, set by `vibe-tunnel submit`):
+# Modes (VT_MODE):
+#   tunnel  inside a slurm job: run `code tunnel` in the container; everything
+#           printed lands in the slurm log (~/.vibe-tunnel/logs/<jobid>.log),
+#           which `vibe-tunnel wait` polls for the VS Code tunnel link
+#   claude  interactive, right here: Claude Code in the container, then a shell
+#   shell   interactive, right here: a shell in the container
+#
+# Inputs (environment, set by `vibe-tunnel submit|claude|shell`):
 #   VIBE_TUNNEL_DIR   this repo on the cluster
-#   VT_ENV_FILE       per-job settings file (VT_TUNNEL_NAME, VT_CONFIG, VT_WORKSPACE,
-#                     VT_HOME, VT_EXTENSIONS, VT_RW_BINDS, VT_RO_BINDS)
-#   VT_STATE_DIR      ~/.vibe-tunnel (site settings live in $VT_STATE_DIR/env)
+#   VT_ENV_FILE       per-run settings (VT_TUNNEL_NAME, VT_CONFIG, VT_CONFIG_FILE,
+#                     VT_WORKSPACE, VT_HOME, VT_EXTENSIONS, VT_RW_BINDS, VT_RO_BINDS)
+#   VT_STATE_DIR      ~/.vibe-tunnel (site settings in $VT_STATE_DIR/env)
+# Remaining arguments are passed to the program in the container (claude mode).
 
 log() { printf '[%s] vibe-tunnel: %s\n' "$(date '+%H:%M:%S')" "$*"; }
-die() { log "ERROR: $*"; exit 1; }
+die() { log "ERROR: $*" >&2; exit 1; }
 
 VIBE_TUNNEL_DIR=${VIBE_TUNNEL_DIR:-$HOME/vibe-tunnel}
-VT_STATE_DIR=${VT_STATE_DIR:-$HOME/.vibe-tunnel}
 # shellcheck disable=SC1091
-[ -f "$VT_STATE_DIR/env" ] && . "$VT_STATE_DIR/env"
+. "$VIBE_TUNNEL_DIR/bin/vibe-tunnel-lib"
+VT_MODE=${VT_MODE:-tunnel}
+case "$VT_MODE" in tunnel|claude|shell) ;; *) die "unknown mode: $VT_MODE" ;; esac
 
-EULER_VIBE_DIR=${EULER_VIBE_DIR:-$(dirname "$VIBE_TUNNEL_DIR")/euler-vibe}
-[ -d "$EULER_VIBE_DIR" ] || EULER_VIBE_DIR=$HOME/euler-vibe
-CLAUDE_MOBILE_IMAGE=${CLAUDE_MOBILE_IMAGE:-$EULER_VIBE_DIR/images/claude-mobile.sif}
-CLAUDE_MOBILE_SHELLRC=${CLAUDE_MOBILE_SHELLRC:-$EULER_VIBE_DIR/bin/claude-mobile-shellrc}
-VT_CODE_CLI=${VT_CODE_CLI:-$VIBE_TUNNEL_DIR/cli/code}
-[ -x "$VT_CODE_CLI" ] || { [ -x "$HOME/code" ] && VT_CODE_CLI=$HOME/code; } || true
-VT_ENTRY=$VIBE_TUNNEL_DIR/bin/vibe-tunnel-entry
-
-# --- 1. per-job settings ----------------------------------------------------
+# --- 1. per-run settings ----------------------------------------------------
 VT_TUNNEL_NAME= VT_CONFIG= VT_CONFIG_FILE= VT_WORKSPACE= VT_HOME= VT_EXTENSIONS=
 VT_RW_BINDS=() VT_RO_BINDS=()
-
-# Only the keys `vibe-tunnel submit` writes are accepted, so the file stays data.
-env_is_valid() {
-    local line
-    while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in
-            ''|'#'*) ;;
-            VT_TUNNEL_NAME=*|VT_CONFIG=*|VT_CONFIG_FILE=*|VT_WORKSPACE=*|VT_HOME=*|VT_EXTENSIONS=*|'VT_RW_BINDS=('*|'VT_RO_BINDS=('*) ;;
-            *) return 1 ;;
-        esac
-    done < "$1"
-}
-config_is_valid() {
-    local line
-    while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in
-            ''|'#'*) ;;
-            WORKSPACE=*|MODE=*|CLAUDE_MOBILE_HOME=*|'RW_BINDS=('*|'RO_BINDS=('*|PROFILE=*|LABEL=*) ;;
-            *) return 1 ;;
-        esac
-    done < "$1"
-}
-
 if [ -n "${VT_ENV_FILE:-}" ]; then
     [ -f "$VT_ENV_FILE" ] || die "env file missing: $VT_ENV_FILE"
     env_is_valid "$VT_ENV_FILE" || die "env file has unexpected content: $VT_ENV_FILE"
     # shellcheck disable=SC1090
     . "$VT_ENV_FILE"
 fi
-
-# A saved claude-launch config supplies the sandbox; explicit VT_* values win.
-WORKSPACE= CLAUDE_MOBILE_HOME= RW_BINDS=() RO_BINDS=() MODE= PROFILE= LABEL=
-if [ -n "$VT_CONFIG_FILE" ]; then
-    [ -f "$VT_CONFIG_FILE" ] || die "config file not found: $VT_CONFIG_FILE"
-    config_is_valid "$VT_CONFIG_FILE" || die "config has unexpected content: $VT_CONFIG_FILE"
-    # shellcheck disable=SC1090
-    . "$VT_CONFIG_FILE"
-    log "using saved config '${VT_CONFIG:-$VT_CONFIG_FILE}'"
-fi
-WORKSPACE=${VT_WORKSPACE:-${WORKSPACE:-$HOME}}
-CLAUDE_MOBILE_HOME=${VT_HOME:-${CLAUDE_MOBILE_HOME:-$EULER_VIBE_DIR/home/claude-mobile}}
-RW_BINDS+=("${VT_RW_BINDS[@]+"${VT_RW_BINDS[@]}"}")
-RO_BINDS+=("${VT_RO_BINDS[@]+"${VT_RO_BINDS[@]}"}")
+vt_resolve_sandbox || exit 1
+[ -z "$VT_CONFIG_FILE" ] || log "using saved config '${VT_CONFIG:-$VT_CONFIG_FILE}'"
 TUNNEL_NAME=${VT_TUNNEL_NAME:-vibe-${SLURM_JOB_ID:-$$}}
 EXTENSIONS=${VT_EXTENSIONS-anthropic.claude-code}
 
 # --- 2. sanity checks -------------------------------------------------------
-[ -e "$CLAUDE_MOBILE_IMAGE" ] || die "container image missing: $CLAUDE_MOBILE_IMAGE"
-[ -x "$VT_CODE_CLI" ]        || die "VS Code CLI missing: $VT_CODE_CLI (run setup.sh)"
-[ -f "$VT_ENTRY" ]           || die "entry script missing: $VT_ENTRY"
-[ -d "$WORKSPACE" ]          || die "workspace is not a directory: $WORKSPACE"
+[ -e "$VT_IMAGE" ]  || die "container image missing: $VT_IMAGE (run setup.sh to build it)"
+[ -f "$VT_ENTRY" ]  || die "entry script missing: $VT_ENTRY"
+[ -d "$WORKSPACE" ] || die "workspace is not a directory: $WORKSPACE"
+[ "$VT_MODE" != tunnel ] || [ -x "$VT_CODE_CLI" ] || die "VS Code CLI missing: $VT_CODE_CLI (run setup.sh)"
 mkdir -p "$CLAUDE_MOBILE_HOME"
 
 # Euler: outbound HTTPS (tunnel relay, server download, Anthropic API) needs the proxy.
 if command -v module >/dev/null 2>&1; then
     module load eth_proxy 2>/dev/null || log "module eth_proxy not available; continuing with current proxy env"
 fi
-SINGULARITY=$(command -v singularity || command -v apptainer || true)
-[ -n "$SINGULARITY" ] || die "neither singularity nor apptainer found on the compute node"
+SINGULARITY=$(vt_singularity)
+[ -n "$SINGULARITY" ] || die "neither singularity nor apptainer found on this node"
 
-# /tmp inside the container: a per-job directory on local scratch (--writable-tmpfs is tiny).
+# /tmp inside the container: a per-run directory on local scratch (--writable-tmpfs is tiny).
 VT_TMPDIR=${TMPDIR:-/tmp}/vibe-tunnel.${SLURM_JOB_ID:-$$}
 mkdir -p "$VT_TMPDIR"
+trap 'rm -rf "$VT_TMPDIR" 2>/dev/null || true' EXIT
 
-# --- 3. assemble the container invocation (mirrors euler-vibe/bin/claude-mobile)
-ARGS=(
-    --nv
-    --cleanenv
-    --containall
-    --home "$CLAUDE_MOBILE_HOME:/home"
-    --bind "$WORKSPACE:/workspace"
-    --bind "$VT_TMPDIR:/tmp"
-    --bind "$VT_ENTRY:/opt/vibe-tunnel/entry:ro"
-    --bind "$VT_CODE_CLI:/opt/vibe-tunnel/code:ro"
-)
-[ -f "$CLAUDE_MOBILE_SHELLRC" ] && ARGS+=(--bind "$CLAUDE_MOBILE_SHELLRC:/opt/vibe-tunnel/shellrc:ro")
+# --- 3. container invocation -------------------------------------------------
+vt_container_args
+vt_container_env "VT_MODE=$VT_MODE" "VT_TUNNEL_NAME=$TUNNEL_NAME" "VT_JOB_ID=${SLURM_JOB_ID:-local}" \
+    "VT_EXTENSIONS=$EXTENSIONS" "VT_HOST_WORKSPACE=$WORKSPACE" "VT_HOST_NODE=$(hostname -s)"
 
-for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do ARGS+=(--bind "$b"); done
-for b in "${RO_BINDS[@]+"${RO_BINDS[@]}"}"; do
-    case "$b" in
-        *:ro) ARGS+=(--bind "$b") ;;
-        *:rw) ARGS+=(--bind "${b%:rw}:ro") ;;
-        *)    ARGS+=(--bind "$b:ro") ;;
-    esac
-done
+banner() {
+    echo "================ vibe-tunnel ($VT_MODE) ================"
+    echo "node       : $(hostname -s)${SLURM_JOB_ID:+  job $SLURM_JOB_ID}"
+    echo "image      : $VT_IMAGE"
+    echo "workspace  : $WORKSPACE  -> /workspace"
+    echo "home       : $CLAUDE_MOBILE_HOME  -> /home"
+    echo "tmp        : $VT_TMPDIR  -> /tmp"
+    for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do echo "bind (rw)  : $b"; done
+    for b in "${RO_BINDS[@]+"${RO_BINDS[@]}"}"; do echo "bind (ro)  : $b"; done
+}
 
-# Forward proxy settings through --cleanenv (both spellings, both prefixes).
-for proxy_var in http_proxy https_proxy all_proxy no_proxy; do
-    upper=$(printf '%s' "$proxy_var" | tr '[:lower:]' '[:upper:]')
-    val=${!proxy_var:-${!upper:-}}
-    if [ -n "$val" ]; then
-        export "SINGULARITYENV_${proxy_var}=$val" "SINGULARITYENV_${upper}=$val"
-        export "APPTAINERENV_${proxy_var}=$val"   "APPTAINERENV_${upper}=$val"
-    fi
-done
-# Node (Claude Code) only honours HTTP(S)_PROXY with this set.
-export SINGULARITYENV_NODE_USE_ENV_PROXY=1 APPTAINERENV_NODE_USE_ENV_PROXY=1
-# Settings for the entry script.
-for kv in "VT_TUNNEL_NAME=$TUNNEL_NAME" "VT_JOB_ID=${SLURM_JOB_ID:-local}" \
-          "VT_EXTENSIONS=$EXTENSIONS" "VT_HOST_WORKSPACE=$WORKSPACE" "VT_HOST_NODE=$(hostname -s)"; do
-    export "SINGULARITYENV_$kv" "APPTAINERENV_$kv"
-done
+# --- 4. run -----------------------------------------------------------------
+if [ "$VT_MODE" != tunnel ]; then
+    banner >&2
+    echo "=================================================" >&2
+    exec "$SINGULARITY" exec "${CONTAINER_ARGS[@]}" "$VT_IMAGE" bash /opt/vibe-tunnel/entry "$@"
+fi
 
-# --- 4. report + run --------------------------------------------------------
-echo "================ vibe-tunnel job ================"
-echo "job        : ${SLURM_JOB_ID:-?} on $(hostname -s)"
-echo "image      : $CLAUDE_MOBILE_IMAGE"
-echo "workspace  : $WORKSPACE  -> /workspace"
-echo "home       : $CLAUDE_MOBILE_HOME  -> /home"
-echo "tmp        : $VT_TMPDIR  -> /tmp"
+banner
 echo "code cli   : $VT_CODE_CLI"
-for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do echo "bind (rw)  : $b"; done
-for b in "${RO_BINDS[@]+"${RO_BINDS[@]}"}"; do echo "bind (ro)  : $b"; done
 echo "tunnel     : $TUNNEL_NAME"
 echo "VT_TUNNEL_NAME=$TUNNEL_NAME"
 echo "================================================="
@@ -156,7 +96,7 @@ echo "================================================="
 child=
 forward() { [ -n "$child" ] && kill -TERM "$child" 2>/dev/null || true; }
 trap forward TERM INT
-"$SINGULARITY" exec "${ARGS[@]}" "$CLAUDE_MOBILE_IMAGE" bash /opt/vibe-tunnel/entry &
+"$SINGULARITY" exec "${CONTAINER_ARGS[@]}" "$VT_IMAGE" bash /opt/vibe-tunnel/entry &
 child=$!
 # A trapped signal makes `wait` return early (>128) while the child is still
 # shutting down, so keep waiting until it has really exited.
@@ -167,5 +107,4 @@ while :; do
     kill -0 "$child" 2>/dev/null || break
 done
 log "container exited with status $status"
-rm -rf "$VT_TMPDIR" 2>/dev/null || true
 exit "$status"
