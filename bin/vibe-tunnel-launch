@@ -335,10 +335,10 @@ render_header_home() {
         printf '%s\n' "$EL"
         return
     fi
-    printf '  %s╭────────────────────────────────────────────────────────────╮%s%s\n' "$CYAN" "$RST" "$EL"
+    printf '  %s╭──────────────────────────────────────────────────────────────────╮%s%s\n' "$CYAN" "$RST" "$EL"
     printf '  %s│%s  %s● vibe-tunnel%s   %sVS Code + Claude inside the sandbox, on a node%s  %s│%s%s\n' \
         "$CYAN" "$RST" "$BOLD$GREEN" "$RST" "$DIM" "$RST" "$CYAN" "$RST" "$EL"
-    printf '  %s╰────────────────────────────────────────────────────────────╯%s%s\n' "$CYAN" "$RST" "$EL"
+    printf '  %s╰──────────────────────────────────────────────────────────────────╯%s%s\n' "$CYAN" "$RST" "$EL"
     printf '%s\n' "$EL"
     print_running
     printf '%s\n' "$EL"
@@ -361,10 +361,10 @@ render_header() {
     home_cur
     if [ "$HEADER_MODE" = home ]; then render_header_home; return; fi
     if [ "${HEADER_COMPACT:-0}" -eq 1 ]; then render_header_compact; return; fi
-    printf '  %s╭────────────────────────────────────────────────────────────╮%s%s\n' "$CYAN" "$RST" "$EL"
+    printf '  %s╭──────────────────────────────────────────────────────────────────╮%s%s\n' "$CYAN" "$RST" "$EL"
     printf '  %s│%s  %s● vibe-tunnel%s   %sVS Code + Claude inside the sandbox, on a node%s  %s│%s%s\n' \
         "$CYAN" "$RST" "$BOLD$GREEN" "$RST" "$DIM" "$RST" "$CYAN" "$RST" "$EL"
-    printf '  %s╰────────────────────────────────────────────────────────────╯%s%s\n' "$CYAN" "$RST" "$EL"
+    printf '  %s╰──────────────────────────────────────────────────────────────────╯%s%s\n' "$CYAN" "$RST" "$EL"
     printf '%s\n' "$EL"
     printf '  %sMode%s       %s%s%s  %s%s%s%s\n' "$BOLD" "$RST" "$GREEN" "$MODE" "$RST" "$DIM" "$(mode_hint)" "$RST" "$EL"
     printf '%s\n' "$EL"
