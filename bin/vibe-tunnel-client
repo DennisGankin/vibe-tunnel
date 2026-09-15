@@ -13,7 +13,8 @@ set -euo pipefail
 #   vibe-tunnel open JOBID|LABEL      (re)open a running tunnel in VS Code
 #   vibe-tunnel wait JOBID            wait for a submitted job, then open
 #   vibe-tunnel status|logs|stop|configs|profiles|doctor ...   run on the cluster
-#   vibe-tunnel client-setup          write ~/.config/vibe-tunnel/client (host, remote dir, how to open)
+#   vibe-tunnel client-setup          write ~/.config/vibe-tunnel/client (host, remote dir, how to open),
+#                                     then run the cluster-side setup.sh over ssh (--no-remote-setup skips)
 #
 # Settings file (~/.config/vibe-tunnel/client):
 #   VT_HOST=euler                       ssh host or alias
@@ -154,11 +155,14 @@ wait_and_open() {
 # --- commands -------------------------------------------------------------------------------
 cmd_client_setup() {
     load_cfg || true
+    local yes=0 remote_setup=1
     while [ $# -gt 0 ]; do
         case "$1" in
             --host) shift; VT_HOST=$1 ;;
             --remote-dir) shift; VT_REMOTE_DIR=$1 ;;
             --open-with) shift; VT_OPEN_WITH=$1 ;;
+            -y|--yes) yes=1 ;;
+            --no-remote-setup) remote_setup=0 ;;
             *) die "client-setup: unknown option $1" ;;
         esac; shift
     done
@@ -173,6 +177,21 @@ cmd_client_setup() {
     ok "wrote $VT_CLIENT_CFG"
     printf '  checking the connection…\n'
     connect && ok "$VT_HOST: $VT_REMOTE_DIR/bin/vibe-tunnel found"
+    # Cluster side in the same go: the installation's setup.sh writes the user's
+    # private ~/.vibe-tunnel and PATH line (and, for an own checkout, builds the
+    # image / downloads the CLI). Needs a tty for its prompts.
+    if [ "$remote_setup" -eq 1 ]; then
+        local run=1 r
+        if [ "$yes" -eq 0 ] && [ -t 0 ]; then
+            read -r -p "  Run the cluster-side setup now ($VT_REMOTE_DIR/setup.sh on $VT_HOST)? [Y/n] " r || true
+            case "$r" in n|N|no|NO) run=0 ;; esac
+        fi
+        if [ "$run" -eq 1 ]; then
+            printf '\n'
+            ssh -t "${SSH_OPTS[@]}" "$VT_HOST" "$(printf '%q' "$VT_REMOTE_DIR/setup.sh")$([ "$yes" -eq 1 ] && printf ' -y')" \
+                || warn "cluster-side setup did not finish cleanly; run it by hand: ssh $VT_HOST $VT_REMOTE_DIR/setup.sh"
+        fi
+    fi
     printf '\n  Run %svibe-tunnel%s to start.\n' "$CYAN" "$RST"
 }
 

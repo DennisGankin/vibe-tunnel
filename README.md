@@ -35,20 +35,18 @@ The VS Code CLI is not baked into the image: it is a static binary that gets bin
 - **Resources are editable in the menu.** Profiles (`profiles/*.sbatch`) are presets; the *Resources* entry shows time, CPUs, memory per CPU, GPUs, partition and account, lets you change any of them, and saves the values with the config. Overrides are passed to `sbatch` as flags and beat the profile's `#SBATCH` lines. `vibe-tunnel profiles edit|new NAME` edits or creates a preset (your copies live in `~/.vibe-tunnel/profiles/` and shadow the repo's).
 - **One command, both places.** `vibe-tunnel` is bash: on the cluster it is the CLI, on the laptop (no slurm) it drives the cluster copy over ssh. No Python, no environment.
 
-## New lab member? Two commands
+## New lab member? One command
 
 If your group runs a shared installation on the cluster (one directory with the scripts, the built image and the
 VS Code CLI, maintained by one person), you never build anything:
 
 ```bash
-# on Euler: use the shared installation (writes only ~/.vibe-tunnel, adds bin/ to your PATH)
-/cluster/project/<group>/software/vibe-tunnel/setup.sh
-```
-```bash
 # on your laptop: VS Code with the `code` command + a working `ssh euler`, then
 git clone <this repo> ~/vibe-tunnel && cd ~/vibe-tunnel && ./setup.sh --client
 ```
-Answer the client's questions with your ssh alias and the shared installation's path. Then run `vibe-tunnel`.
+Answer with your ssh alias and the shared installation's path (e.g. `/cluster/project/<group>/software/vibe-tunnel`).
+The client then runs that installation's `setup.sh` on the cluster for you, which writes only your private
+`~/.vibe-tunnel` and adds `bin/` to your PATH there. Then run `vibe-tunnel`.
 Three one-time logins on the first tunnel, all stored in your private sandbox home: the VS Code tunnel (GitHub
 device code, handled by the launcher), Claude inside the container (`claude` in a VS Code terminal), and
 installing the Claude Code extension in the tunnel.
