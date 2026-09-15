@@ -20,9 +20,9 @@ The client then runs that installation's `setup.sh` on the cluster for you, whic
 ```bash
 vibe-tunnel
 ```
-Three one-time logins on the first tunnel, all stored in your private sandbox home: the VS Code tunnel (GitHub
-device code, handled by the launcher), Claude inside the container (`claude` in a VS Code terminal), and
-installing the Claude Code extension in the tunnel.
+Three one-time logins on the first tunnel: the VS Code tunnel (GitHub device code, handled by the launcher; once
+per user), Claude inside the container (`claude` in a VS Code terminal; once per sandbox home), and installing
+the Claude Code extension in the tunnel (once per sandbox home).
 
 Your configs, profiles, logs and sandbox home live in `~/.vibe-tunnel` (mode 700); nothing you do touches the
 shared directory. Problems? See [Troubleshooting](#troubleshooting). Other groups: see the maintainer guide in
@@ -151,7 +151,7 @@ The menu offers these as *mode* too (tunnel / claude / shell).
 | `vibe-tunnel` on the laptop hangs, or `ssh euler failed` although plain `ssh euler` works | A half-dead multiplexed ssh connection after a VPN/network hiccup. The client detects and resets it automatically; by hand: `ssh -O exit -o ControlPath=~/.ssh/vibe-tunnel-%C euler` |
 | Menu keys react slowly | Usually the same stale ssh connection (above). If `squeue -u $USER` itself takes seconds on Euler, slurm is slow; the menu waits for it when drawing the home screen |
 | "Uh oh, we couldn't find anything" on GitHub's device page | An already-used login code was shown (fixed for reopen). A fresh job that really needs a login prints a new code in `vibe-tunnel logs <jobid>` |
-| Asked to log in to VS Code on every job | The saved token is not being reused: look for `reusing saved VS Code login` in the job log and for `token.json` in `<sandbox home>/.vscode-cli/` |
+| Asked to log in to VS Code on every job | The saved token is not being reused: look for `reusing saved VS Code login` in the job log and for `~/.vibe-tunnel/vscode-auth/token.json` on the cluster |
 | Job ends before the link appears | `vibe-tunnel logs <jobid>`: a missing workspace directory, a wrong account/partition (`sbatch` error), or the container image missing |
 | No Claude Code extension in the tunnel | Extensions live in the sandbox home, not your cluster home. Install it once from the Extensions view (choose the install button for the tunnel), or copy `~/.vscode-server/extensions` into `<sandbox home>/.vscode-server/` |
 | VS Code opens but the terminal starts in `/` | No folder open: File → Open Folder → your workspace path, or use the `code --folder-uri …` line that `vibe-tunnel wait` prints |
@@ -167,7 +167,7 @@ The same thing as a sidebar inside VS Code: running tunnels (click to connect, s
 setup with a remote directory browser. Install the `.vsix` from [vscode-extension/](vscode-extension/):
 
 ```bash
-code --install-extension vscode-extension/vibe-tunnel-0.1.3.vsix
+code --install-extension vscode-extension/vibe-tunnel-0.1.4.vsix
 ```
 If you use VS Code **profiles**, install it into the profile you work in: `code --profile <name> --install-extension …`,
 or *Extensions → ··· → Install from VSIX…* inside that profile. Extensions are per profile.

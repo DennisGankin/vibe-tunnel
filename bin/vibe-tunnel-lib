@@ -203,6 +203,12 @@ vt_container_args() {
         --bind "$VT_SHELLRC:/opt/vibe-tunnel/shellrc:ro"
     )
     [ -x "$VT_CODE_CLI" ] && CONTAINER_ARGS+=(--bind "$VT_CODE_CLI:/opt/vibe-tunnel/code:ro")
+    # The VS Code tunnel login belongs to the user, not to a sandbox home: keep it
+    # in the (private) state dir and mount it into every container, so the GitHub
+    # device login happens once per user rather than once per home.
+    VT_VSCODE_AUTH=${VT_VSCODE_AUTH:-$VT_STATE_DIR/vscode-auth}
+    mkdir -p "$VT_VSCODE_AUTH" 2>/dev/null && chmod 700 "$VT_VSCODE_AUTH" 2>/dev/null || true
+    [ -d "$VT_VSCODE_AUTH" ] && CONTAINER_ARGS+=(--bind "$VT_VSCODE_AUTH:/opt/vibe-tunnel/vscode-auth")
     local b
     for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do CONTAINER_ARGS+=(--bind "$b"); done
     for b in "${RO_BINDS[@]+"${RO_BINDS[@]}"}"; do

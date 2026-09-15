@@ -88,14 +88,21 @@ log "vscode cli: $("$CODE" --version 2>/dev/null | head -n1)"
 export VSCODE_CLI_USE_FILE_KEYCHAIN=1
 CLI_ROOT=$HOME/.vscode-cli
 CLI_DATA_DIR=$CLI_ROOT/jobs/${VT_JOB_ID:-$$}
-SHARED_TOKEN=$CLI_ROOT/token.json
 SERVER_DATA_DIR=$HOME/.vscode-server
 mkdir -p "$CLI_DATA_DIR" "$SERVER_DATA_DIR"
+# Login token: per user (mounted by the job) when available, else per home (older setups).
+if [ -d /opt/vibe-tunnel/vscode-auth ] && [ -w /opt/vibe-tunnel/vscode-auth ]; then
+    SHARED_TOKEN=/opt/vibe-tunnel/vscode-auth/token.json
+    # migrate a login saved per home by earlier versions
+    [ -f "$SHARED_TOKEN" ] || { [ -f "$CLI_ROOT/token.json" ] && cp -f "$CLI_ROOT/token.json" "$SHARED_TOKEN" && chmod 600 "$SHARED_TOKEN" && log "moved the VS Code login to the per-user store"; }
+else
+    SHARED_TOKEN=$CLI_ROOT/token.json
+fi
 [ -f "$SHARED_TOKEN" ] && cp -f "$SHARED_TOKEN" "$CLI_DATA_DIR/token.json" && log "reusing saved VS Code login"
 
 sync_token() {  # persist a fresh login for the next job
     if [ -f "$CLI_DATA_DIR/token.json" ] && ! cmp -s "$CLI_DATA_DIR/token.json" "$SHARED_TOKEN" 2>/dev/null; then
-        cp -f "$CLI_DATA_DIR/token.json" "$SHARED_TOKEN" && log "saved VS Code login for future jobs"
+        cp -f "$CLI_DATA_DIR/token.json" "$SHARED_TOKEN" && chmod 600 "$SHARED_TOKEN" && log "saved VS Code login for future jobs"
     fi
 }
 
