@@ -167,7 +167,7 @@ The same thing as a sidebar inside VS Code: running tunnels (click to connect, s
 setup with a remote directory browser. Install the `.vsix` from [vscode-extension/](vscode-extension/):
 
 ```bash
-code --install-extension vscode-extension/vibe-tunnel-0.1.0.vsix
+code --install-extension vscode-extension/vibe-tunnel-0.1.1.vsix
 ```
 Set *vibe-tunnel › Host* and *Remote Dir* in the settings (defaults: `euler` and the Beltrao lab's shared
 installation). The extension needs ssh to work without prompts: an ssh key in your agent, or *Log in via
