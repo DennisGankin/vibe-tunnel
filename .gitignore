@@ -7,3 +7,6 @@ cli/*.tar.gz
 # Built container images and the runtime sandbox homes (logins, VS Code server, ...)
 images/*.sif
 home/
+
+# Lab-specific defaults of an installation (see site.env.example)
+site.env

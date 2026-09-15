@@ -448,19 +448,27 @@ profiles_new() {
 # --- doctor -----------------------------------------------------------------
 cmd_doctor() {
     printf '%s== vibe-tunnel doctor ==%s\n' "$BOLD" "$RST"
-    echo "  repo:        $VIBE_TUNNEL_DIR"
-    echo "  state dir:   $VT_STATE_DIR"
+    if [ "$VT_SHARED" -eq 1 ]; then
+        echo "  install:     $VIBE_TUNNEL_DIR  (shared installation${VT_MAINTAINER:+, maintained by $VT_MAINTAINER}; not writable by you)"
+        echo "               your own profiles go to $VT_USER_PROFILES (vibe-tunnel profiles edit|new)"
+    else
+        echo "  install:     $VIBE_TUNNEL_DIR  (your own checkout)"
+    fi
+    [ -f "$VT_SITE_ENV" ] && echo "  site env:    $VT_SITE_ENV"
+    echo "  state dir:   $VT_STATE_DIR  (private: configs, profiles, logs, sandbox home)"
     echo "  configs:     $VT_CONFIG_DIR"
     echo
     if [ -e "$VT_IMAGE" ]; then
         ok "image: $VT_IMAGE ($(du -h "$VT_IMAGE" | cut -f1))"
         [ "$VT_IMAGE" != "${CLAUDE_MOBILE_IMAGE:-}" ] || warn "that is euler-vibe's image (fallback); build vibe-tunnel's own with ./setup.sh"
     
+    elif [ "$VT_SHARED" -eq 1 ]; then warn "image missing: $VT_IMAGE  (ask the maintainer to run setup.sh in the installation)"
     else warn "image missing: $VT_IMAGE  (cd $VIBE_TUNNEL_DIR && module load eth_proxy && ./setup.sh)"; fi
     [ -f "$VT_SHELLRC" ] && ok "shellrc: $VT_SHELLRC" || warn "shellrc missing: $VT_SHELLRC"
     ok "default sandbox home: $VT_DEFAULT_HOME"
     [ -z "$EULER_VIBE_DIR" ] || ok "euler-vibe (optional): $EULER_VIBE_DIR"
     if [ -x "$VT_CODE_CLI" ]; then ok "VS Code CLI: $VT_CODE_CLI ($("$VT_CODE_CLI" --version 2>/dev/null | head -n1))"
+    elif [ "$VT_SHARED" -eq 1 ]; then warn "VS Code CLI missing: $VT_CODE_CLI  (ask the maintainer to run setup.sh in the installation)"
     else warn "VS Code CLI missing: $VT_CODE_CLI  (run ./setup.sh)"; fi
     [ -n "$(vt_singularity)" ] && ok "singularity/apptainer on PATH" || warn "singularity/apptainer not on PATH (fine on a login node; jobs load it)"
     command -v sbatch >/dev/null 2>&1 && ok "slurm (sbatch) available" || warn "sbatch not found"
