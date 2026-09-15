@@ -20,7 +20,7 @@ The client then runs that installation's `setup.sh` on the cluster for you, whic
 ```bash
 vibe-tunnel
 ```
-Three one-time logins on the first tunnel: the VS Code tunnel (GitHub device code, handled by the launcher; once
+Two one-time logins on the first tunnel: the VS Code tunnel (GitHub device code, handled by the launcher; once
 per user), Claude inside the container (`claude` in a VS Code terminal; once per sandbox home), and installing
 the Claude Code extension in the tunnel (once per sandbox home).
 
@@ -113,7 +113,7 @@ submenus and can be saved as a named config. Saved configs live in
 ```bash
 vibe-tunnel submit --config myproj   # profile, resources + label come from the config; flags override
 vibe-tunnel submit --config myproj --time 2-00:00:00 --gpus a100:2   # one-off resource changes
-vibe-tunnel wait <jobid>             # prints TUNNEL= / LINK= / DESKTOP= once the tunnel is up
+vibe-tunnel wait <jobid>             # prints TUNNEL= / WORKSPACE= / LINK= / DESKTOP= once the tunnel is up
 vibe-tunnel status
 vibe-tunnel stop myproj
 ```
@@ -141,7 +141,7 @@ The menu offers these as *mode* too (tunnel / claude / shell).
 - `claude` in a terminal is a shell function that adds `--dangerously-skip-permissions` (Claude's own sandbox cannot run inside Apptainer; the container is the sandbox). Set `VT_CLAUDE_ASK=1` to keep the prompts. The **Claude Code extension** spawns the `claude` binary directly and uses normal permission prompts in the VS Code UI.
 - The first start of a home installs a self-updating native Claude build to `~/.local/bin` (the one in the image's read-only `/usr` cannot update itself). Log in to Claude once per home.
 - `git`/`ssh` config from your cluster `$HOME` is *not* visible (that is the point of the sandbox). Put a `.gitconfig` into the sandbox home, or add `--ro ~/.ssh` if you need to push over ssh.
-- Extensions and VS Code settings live in `/home/.vscode-server` of the **sandbox** home, not your cluster `$HOME`, so a new sandbox home starts without them. Copy them over once or install from the Extensions view; see docs/CLUSTER_SETUP.md section 6. The `--extensions` preinstall did not work with CLI 1.125.1.
+- Extensions and VS Code settings live in `/home/.vscode-server` of the **sandbox** home, not your cluster `$HOME`, so a new sandbox home starts with only the preinstalled ones (`--extensions`, default Claude Code; works with VS Code CLI ≥ 1.13x). Others: install from the Extensions view or copy them over once; see docs/CLUSTER_SETUP.md.
 - The image (`images/vibe-tunnel.def`): Ubuntu 24.04, Node 24, Claude Code, uv, Python 3 with build tools, git, ripgrep. GPU access via `--nv`.
 
 ## Troubleshooting
@@ -153,7 +153,7 @@ The menu offers these as *mode* too (tunnel / claude / shell).
 | "Uh oh, we couldn't find anything" on GitHub's device page | An already-used login code was shown (fixed for reopen). A fresh job that really needs a login prints a new code in `vibe-tunnel logs <jobid>` |
 | Asked to log in to VS Code on every job | The saved token is not being reused: look for `reusing saved VS Code login` in the job log and for `~/.vibe-tunnel/vscode-auth/token.json` on the cluster |
 | Job ends before the link appears | `vibe-tunnel logs <jobid>`: a missing workspace directory, a wrong account/partition (`sbatch` error), or the container image missing |
-| No Claude Code extension in the tunnel | Extensions live in the sandbox home, not your cluster home. Install it once from the Extensions view (choose the install button for the tunnel), or copy `~/.vscode-server/extensions` into `<sandbox home>/.vscode-server/` |
+| No Claude Code extension in the tunnel | It is preinstalled with VS Code CLI ≥ 1.13x (`cli/code` from `setup.sh`); an old `~/code` CLI cannot. Otherwise install it once from the Extensions view (choose the install button for the tunnel) |
 | VS Code opens but the terminal starts in `/` | No folder open: File → Open Folder → your workspace path, or use the `code --folder-uri …` line that `vibe-tunnel wait` prints |
 | `claude` asks for login although you logged in before | Different sandbox home: each home has its own login. Check `Home` in the menu's Sandbox screen; the default is `~/.vibe-tunnel/home` |
 | Windows | See [Windows](#windows) below |
