@@ -169,6 +169,8 @@ setup with a remote directory browser. Install the `.vsix` from [vscode-extensio
 ```bash
 code --install-extension vscode-extension/vibe-tunnel-0.1.1.vsix
 ```
+If you use VS Code **profiles**, install it into the profile you work in: `code --profile <name> --install-extension …`,
+or *Extensions → ··· → Install from VSIX…* inside that profile. Extensions are per profile.
 Set *vibe-tunnel › Host* and *Remote Dir* in the settings (defaults: `euler` and the Beltrao lab's shared
 installation). The extension needs ssh to work without prompts: an ssh key in your agent, or *Log in via
 terminal* once from the sidebar (macOS/Linux; the connection is then reused for 15 minutes). It runs on Windows

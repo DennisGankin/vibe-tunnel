@@ -9,6 +9,9 @@ stop it, read its log, or set up a new one step by step — without leaving VS C
 Download `vibe-tunnel-<version>.vsix` from the repository's `vscode-extension/` folder (or a release), then in
 VS Code: *Extensions* → `···` → *Install from VSIX…*. Or from a terminal: `code --install-extension vibe-tunnel-<version>.vsix`.
 
+If you use VS Code **profiles**, extensions are per profile: install it in the profile you work in (*Install from
+VSIX…* inside that profile, or `code --profile <name> --install-extension …`).
+
 ## Requirements
 
 - ssh access to the cluster that works **without prompts**: an ssh key loaded in your agent, or (macOS/Linux)
