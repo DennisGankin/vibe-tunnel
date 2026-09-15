@@ -190,12 +190,9 @@ async function launchConfig(item?: ConfigItem): Promise<void> {
 
 /** Launch a saved config; asks for a resource profile when the config has none (e.g. claude-launch configs). */
 async function launchByName(name: string): Promise<void> {
+  // A config describes a sandbox; MODE is only what it was last used for. Launching
+  // from the sidebar always means a VS Code tunnel; Claude/shell are separate actions.
   const detail = await cluster.configShow(name);
-  if (detail.mode !== 'tunnel') {
-    const pick = await vscode.window.showInformationMessage(`Config "${name}" is a ${detail.mode} config (no VS Code tunnel). Run it in a terminal?`, 'Open terminal');
-    if (pick) { openTerminal(`vibe-tunnel ${detail.mode} ${name}`, [detail.mode, '--config', name]); }
-    return;
-  }
   if (!detail.profile) {
     const p = await pickProfile(''); if (!p) { return; }
     await submitAndWait([p, '--config', name]);
@@ -312,8 +309,8 @@ async function wizard(d: ConfigDetail, savedName?: string): Promise<void> {
       case 'mode': {
         const m = await vscode.window.showQuickPick([
           { label: 'tunnel', description: 'slurm job with a VS Code tunnel into the container' },
-          { label: 'claude', description: 'Claude Code in the container, in a terminal (no slurm job)' },
-          { label: 'shell', description: 'a shell in the container, in a terminal' }], { placeHolder: 'Mode' });
+          { label: 'claude', description: 'Claude Code in the container, in a terminal (interactive slurm job)' },
+          { label: 'shell', description: 'a shell in the container, in a terminal (interactive slurm job)' }], { placeHolder: 'Mode' });
         if (m) { state.mode = m.label; } break;
       }
       case 'resources': await editResources(state, profiles); break;
@@ -333,7 +330,7 @@ async function wizard(d: ConfigDetail, savedName?: string): Promise<void> {
       }
       case 'launch': {
         if (state.mode !== 'tunnel') {
-          openTerminal(`vibe-tunnel ${state.mode}`, [state.mode, ...configArgs(state, true).filter((_, i, a) => true)]); return;
+          openTerminal(`vibe-tunnel ${state.mode}`, [state.mode, ...configArgs(state, true), '--srun']); return;
         }
         if (!state.profile) { const p = await pickProfile(''); if (!p) { break; } state.profile = p; }
         await submitAndWait(configArgs(state, true)); return;
@@ -427,9 +424,10 @@ function openTerminal(name: string, args: string[] | null): vscode.Terminal {
   term.show();
   return term;
 }
+/** Claude / a shell in the config's sandbox, inside an interactive slurm job (--srun uses the config's resources). */
 function runInTerminal(mode: 'claude' | 'shell', item?: ConfigItem): void {
   if (!item) { return; }
-  openTerminal(`vibe-tunnel ${mode} · ${item.config.name}`, [mode, '--config', item.config.name]);
+  openTerminal(`vibe-tunnel ${mode} · ${item.config.name}`, [mode, '--config', item.config.name, '--srun']);
 }
 /** Interactive ssh in a terminal: type passphrase/OTP once; the multiplexed master then serves the extension. */
 function loginTerminal(): void {

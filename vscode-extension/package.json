@@ -2,7 +2,7 @@
   "name": "vibe-tunnel",
   "displayName": "vibe-tunnel",
   "description": "VS Code + Claude Code inside a sandboxed container on the Euler cluster: start, reconnect and stop tunnels from the sidebar.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "dennisgankin",
   "license": "MIT",
   "repository": {

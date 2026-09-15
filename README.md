@@ -122,8 +122,8 @@ Then on the laptop: `code --folder-uri 'vscode-remote://tunnel+myproj/<cluster p
 
 Without VS Code, on a compute node (e.g. after `srun ... --pty bash`):
 ```bash
-vibe-tunnel claude --config myproj          # Claude Code in the same sandbox, in this terminal
-vibe-tunnel shell --workspace ~/proj        # just a shell in the container
+vibe-tunnel claude --config myproj --srun   # Claude Code in the same sandbox, inside an interactive slurm job
+vibe-tunnel shell --workspace ~/proj        # just a shell in the container, right here (login node: quick checks only)
 ```
 The menu offers these as *mode* too (tunnel / claude / shell).
 
@@ -167,7 +167,7 @@ The same thing as a sidebar inside VS Code: running tunnels (click to connect, s
 setup with a remote directory browser. Install the `.vsix` from [vscode-extension/](vscode-extension/):
 
 ```bash
-code --install-extension vscode-extension/vibe-tunnel-0.1.2.vsix
+code --install-extension vscode-extension/vibe-tunnel-0.1.3.vsix
 ```
 If you use VS Code **profiles**, install it into the profile you work in: `code --profile <name> --install-extension …`,
 or *Extensions → ··· → Install from VSIX…* inside that profile. Extensions are per profile.
