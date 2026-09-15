@@ -31,7 +31,7 @@ The VS Code CLI is not baked into the image: it is a static binary that gets bin
 - **Sandbox configs.** `vibe-tunnel launch` assembles workspace, home, ro/rw binds, resource profile and label in one menu and saves them as named configs. Configs saved with euler-vibe's `claude-launch` are read as well. Or pass `--workspace`, `--rw`, `--ro` directly.
 - **Persistent home.** Auth for Claude, the VS Code login, the downloaded VS Code server and extensions live in the sandbox home (`/home` in the container), so the second start is fast and needs no logins.
 - **Several tunnels at once**, each with its own label, node and resources. Reopen a running one instead of resubmitting.
-- **Resource profiles** are plain sbatch files: `profiles/` in the cluster clone, or your own in `~/.vibe-tunnel/profiles/` (which shadow them).
+- **Resources are editable in the menu.** Profiles (`profiles/*.sbatch`) are presets; the *Resources* entry shows time, CPUs, memory per CPU, GPUs, partition and account, lets you change any of them, and saves the values with the config. Overrides are passed to `sbatch` as flags and beat the profile's `#SBATCH` lines. `vibe-tunnel profiles edit|new NAME` edits or creates a preset (your copies live in `~/.vibe-tunnel/profiles/` and shadow the repo's).
 - **One command, both places.** `vibe-tunnel` is bash: on the cluster it is the CLI, on the laptop (no slurm) it drives the cluster copy over ssh. No Python, no environment.
 
 ## Quick start
@@ -80,7 +80,8 @@ The menu shows the whole setup at once (like euler-vibe's `claude-launch`, which
 cluster paths, and can save the setup as a named config. Saved configs live in
 `~/.config/vibe-tunnel/configs/NAME.conf` and include the resource profile and label, so a later start is just:
 ```bash
-vibe-tunnel submit --config myproj   # profile + label come from the config; flags override
+vibe-tunnel submit --config myproj   # profile, resources + label come from the config; flags override
+vibe-tunnel submit --config myproj --time 2-00:00:00 --gpus a100:2   # one-off resource changes
 vibe-tunnel wait <jobid>             # prints TUNNEL= / LINK= / DESKTOP= once the tunnel is up
 vibe-tunnel status
 vibe-tunnel stop myproj
@@ -124,7 +125,7 @@ bin/vibe-tunnel-job       host side of a run: resolves the sandbox, starts the c
 bin/vibe-tunnel-entry     inside the container: home bootstrap, then `code tunnel`, claude, or a shell
 bin/vibe-tunnel-shellrc   sourced by every shell in the container (claude on PATH, self-update, claude function)
 images/vibe-tunnel.def    container recipe; the built .sif is gitignored
-profiles/*.sbatch         resource profiles: #SBATCH lines + exec bin/vibe-tunnel-job
+profiles/*.sbatch         resource presets: #SBATCH lines + exec bin/vibe-tunnel-job (values editable in the menu)
 setup.sh                  cluster: build image, download VS Code CLI, write ~/.vibe-tunnel/env; laptop: --client
 docs/CLUSTER_SETUP.md     cluster steps, design notes, things to verify on first use
 cli/code                  VS Code CLI binary (downloaded by setup.sh, gitignored)

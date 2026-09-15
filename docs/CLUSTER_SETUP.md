@@ -26,7 +26,13 @@ It is the same binary `codeserver_tunnel` used as `$HOME/code`; if that exists, 
 
 ## 2. Profiles and configs
 
-Adjust `profiles/*.sbatch` for your account/partition. Profiles in `~/.vibe-tunnel/profiles/` take precedence over the repo's.
+Profiles (`profiles/*.sbatch`) are presets for time, CPUs, memory, GPUs, partition and account. You rarely need to
+edit them: the launch menu's *Resources* entry changes any value for the current setup and saves it with the config
+(keys `TIME CPUS MEM GPUS PARTITION ACCOUNT`; empty = the profile's value). At submit time the overrides become
+`sbatch --time= --cpus-per-task= --mem-per-cpu= --gpus= --partition= --account=` flags, which win over the
+file's `#SBATCH` lines. To change a preset itself: `vibe-tunnel profiles edit NAME` (copies a repo preset to
+`~/.vibe-tunnel/profiles/` first, where your copies shadow the repo's) or `vibe-tunnel profiles new NAME --from BASE`.
+Both open `$EDITOR` and also work from the laptop.
 
 Sandbox configs are created with `vibe-tunnel launch` -> *Save current config* (configs you saved earlier with
 `claude-launch` are read too). Not required: `--workspace` works without configs.

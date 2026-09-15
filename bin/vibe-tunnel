@@ -10,6 +10,7 @@ set -euo pipefail
 #   vibe-tunnel submit [PROFILE] [--name LABEL] [--config NAME]
 #                              [--workspace DIR] [--home DIR]
 #                              [--rw DIR[:DEST]]... [--ro DIR[:DEST]]...
+#                              [--time T] [--cpus N] [--mem M] [--gpus G] [--partition P] [--account A]
 #                              [--extensions ID,ID] [--json]
 #   vibe-tunnel claude [sandbox opts] [-- CLAUDE_ARGS]   Claude Code in the container, right here
 #   vibe-tunnel shell  [sandbox opts]                    a shell in the container, right here
@@ -19,7 +20,9 @@ set -euo pipefail
 #   vibe-tunnel logs JOBID [-f]           tail the job log
 #   vibe-tunnel stop JOBID|LABEL          scancel
 #   vibe-tunnel configs [--porcelain]     saved sandbox configs (own + claude-launch's)
-#   vibe-tunnel profiles [--porcelain]    available sbatch resource profiles
+#   vibe-tunnel profiles [--porcelain]    available sbatch resource profiles (presets)
+#   vibe-tunnel profiles show|edit NAME   print / edit a profile (edit copies a repo one to ~/.vibe-tunnel/profiles)
+#   vibe-tunnel profiles new NAME [--from BASE]   create your own profile from a preset and edit it
 #   vibe-tunnel doctor                    check image, CLI, proxy, dirs
 #
 # Saved configs: ${XDG_CONFIG_HOME:-~/.config}/vibe-tunnel/configs/NAME.conf, the same
@@ -51,7 +54,7 @@ ok()   { printf '  %s✓%s %s\n' "$GREEN" "$RST" "$*"; }
 warn() { printf '  %s!%s %s\n' "$YELLOW" "$RST" "$*"; }
 die()  { printf '%svibe-tunnel: %s%s\n' "$RED" "$*" "$RST" >&2; exit 1; }
 
-usage() { sed -n '4,28p' "$VT_BIN" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,31p' "$VT_BIN" | sed 's/^# \{0,1\}//'; }
 
 # --- helpers ---------------------------------------------------------------
 
@@ -106,9 +109,16 @@ log_device() { { grep -Eo 'log into[[:space:]]+https?://[^[:space:]]+[[:space:]]
 OPT_PROFILE= OPT_LABEL= OPT_CONFIG= OPT_WORKSPACE= OPT_HOME= OPT_JSON=0 OPT_CF=
 OPT_EXTENSIONS=${VT_EXTENSIONS-anthropic.claude-code}
 OPT_RW=() OPT_RO=() OPT_REST=()
+R_TIME= R_CPUS= R_MEM= R_GPUS= R_PARTITION= R_ACCOUNT=
 parse_sandbox_opts() {
     while [ $# -gt 0 ]; do
         case "$1" in
+            --time)       R_TIME=$2; shift ;;
+            --cpus)       R_CPUS=$2; shift ;;
+            --mem)        R_MEM=$2; shift ;;
+            --gpus)       R_GPUS=$2; shift ;;
+            --partition)  R_PARTITION=$2; shift ;;
+            --account)    R_ACCOUNT=$2; shift ;;
             --name)       OPT_LABEL=$2; shift ;;
             --config)     OPT_CONFIG=$2; shift ;;
             --workspace)  OPT_WORKSPACE=$2; shift ;;
@@ -160,14 +170,25 @@ write_env_file() {
 cmd_submit() {
     parse_sandbox_opts "$@"
     local profile=$OPT_PROFILE label=$OPT_LABEL
+    local k v
     if [ -n "$OPT_CF" ]; then
-        # A saved config may carry its resources and label; explicit flags win.
+        # A saved config may carry its profile, resource overrides and label; explicit flags win.
         [ -n "$profile" ] || profile=$(config_field "$OPT_CF" PROFILE)
         [ -n "$label" ]   || label=$(config_field "$OPT_CF" LABEL)
+        for k in "${RESOURCE_KEYS[@]}"; do
+            eval "v=\${R_$k:-}"
+            [ -n "$v" ] || eval "R_$k=\$(config_field \"\$OPT_CF\" $k)"
+        done
     fi
     [ -n "$profile" ] || die "submit needs a PROFILE (see: vibe-tunnel profiles)"
     local profile_path
     profile_path=$(resolve_profile "$profile") || die "profile not found: $profile"
+    # Resource overrides go to sbatch as flags, which beat the profile's #SBATCH lines.
+    local sbatch_res=()
+    for k in "${RESOURCE_KEYS[@]}"; do
+        eval "v=\${R_$k:-}"
+        [ -z "$v" ] || sbatch_res+=("$(resource_flag "$k")=$v")
+    done
     [ -x "$VT_CODE_CLI" ] || die "VS Code CLI missing: $VT_CODE_CLI (run ./setup.sh)"
 
     local tunnel_name= job_name=$JOB_PREFIX
@@ -190,17 +211,19 @@ cmd_submit() {
         --job-name="$job_name" \
         --output="$VT_LOG_DIR/%j.log" \
         --export="ALL,VIBE_TUNNEL_DIR=$VIBE_TUNNEL_DIR,VT_ENV_FILE=$env_file,VT_STATE_DIR=$VT_STATE_DIR,VT_MODE=tunnel" \
+        "${sbatch_res[@]+"${sbatch_res[@]}"}" \
         "$profile_path") || die "sbatch failed"
     job_id=${out%%;*}
     [ -n "$job_id" ] || die "could not read the job id from sbatch output: $out"
     printf '%s %s %s %s\n' "$job_id" "$job_name" "$tunnel_name" "$(date +%s)-$$" > "$VT_STATE_DIR/last-job"
 
     if [ "$OPT_JSON" -eq 1 ]; then
-        printf '{"job_id":"%s","job_name":"%s","tunnel_name":"%s","log":"%s","profile":"%s","config":"%s"}\n' \
-            "$job_id" "$job_name" "$tunnel_name" "$VT_LOG_DIR/$job_id.log" "$profile_path" "$OPT_CONFIG"
+        printf '{"job_id":"%s","job_name":"%s","tunnel_name":"%s","log":"%s","profile":"%s","config":"%s","resources":"%s"}\n' \
+            "$job_id" "$job_name" "$tunnel_name" "$VT_LOG_DIR/$job_id.log" "$profile_path" "$OPT_CONFIG" "$(resources_summary "$profile_path")"
     else
         printf 'Submitted job %s%s%s (%s)\n' "$BOLD" "$job_id" "$RST" "$job_name"
         printf '  profile : %s\n' "$profile_path"
+        printf '  resources: %s\n' "$(resources_summary "$profile_path")"
         [ -z "$OPT_CONFIG" ]    || printf '  config  : %s\n' "$OPT_CONFIG"
         [ -z "$OPT_WORKSPACE" ] || printf '  workspace: %s\n' "$OPT_WORKSPACE"
         printf '  log     : %s\n' "$VT_LOG_DIR/$job_id.log"
@@ -334,7 +357,7 @@ cmd_launch() { exec "$VIBE_TUNNEL_DIR/bin/vibe-tunnel-launch" "$@"; }
 # --- configs / profiles -----------------------------------------------------
 cmd_configs() {
     local porcelain=0; [ "${1:-}" = "--porcelain" ] && porcelain=1
-    local d f name ws hd pr lb src found=0 seen=" "
+    local d f name ws hd pr lb src pp found=0 seen=" "
     for d in "$VT_CONFIG_DIR" "$CLAUDE_LAUNCH_CONFIG_DIR"; do
         [ -d "$d" ] || continue
         [ "$d" = "$VT_CONFIG_DIR" ] && src=vibe-tunnel || src=claude-launch
@@ -354,6 +377,11 @@ cmd_configs() {
             else
                 printf '  %s%-20s%s %s\n' "$BOLD" "$name" "$RST" "$ws"
                 printf '  %-20s %shome %s%s%s%s\n' "" "$DIM" "$hd" "${pr:+  profile $pr}" "${lb:+  label $lb}" "$RST"
+                if [ -n "$pr" ] && pp=$(resolve_profile "$pr"); then
+                    local k; for k in "${RESOURCE_KEYS[@]}"; do eval "R_$k=\$(config_field \"\$f\" $k)"; done
+                    printf '  %-20s %s%s%s\n' "" "$DIM" "$(resources_summary "$pp")" "$RST"
+                    for k in "${RESOURCE_KEYS[@]}"; do eval "R_$k="; done
+                fi
                 [ "$src" = claude-launch ] && printf '  %-20s %s(from claude-launch)%s\n' "" "$DIM" "$RST"
             fi
         done
@@ -365,6 +393,9 @@ cmd_configs() {
 }
 
 cmd_profiles() {
+    case "${1:-}" in
+        show|edit|new) local sub=$1; shift; "profiles_$sub" "$@"; return ;;
+    esac
     local porcelain=0; [ "${1:-}" = "--porcelain" ] && porcelain=1
     local d f name seen=" "
     # User profiles (~/.vibe-tunnel/profiles) shadow repo profiles of the same name.
@@ -379,6 +410,41 @@ cmd_profiles() {
             else printf '  %s%-18s%s %s  %s%s%s\n' "$BOLD" "$name" "$RST" "$(profile_summary "$f")" "$DIM" "$f" "$RST"; fi
         done
     done
+}
+
+profiles_show() {
+    local f; f=$(resolve_profile "${1:?profiles show needs a NAME}") || die "profile not found: $1"
+    printf '%s# %s%s\n' "$DIM" "$f" "$RST"; cat "$f"
+}
+# Your own copy of a profile lives in ~/.vibe-tunnel/profiles and shadows the
+# repo's; editing a repo profile copies it there first, so the shared presets
+# stay untouched.
+profiles_edit() {
+    local name=${1:?profiles edit needs a NAME} f
+    f=$(resolve_profile "$name") || die "profile not found: $name (vibe-tunnel profiles new $name creates one)"
+    [ -t 0 ] || die "profiles edit needs a terminal (from the laptop: vibe-tunnel profiles edit $name)"
+    mkdir -p "$VT_USER_PROFILES"
+    case "$f" in
+        "$VT_USER_PROFILES"/*) ;;
+        *) cp "$f" "$VT_USER_PROFILES/$name.sbatch"; f=$VT_USER_PROFILES/$name.sbatch
+           printf '  copied the preset to %s (your copy shadows the repo one)\n' "$f" ;;
+    esac
+    "${EDITOR:-${VISUAL:-vi}}" "$f"
+    printf '  %s: %s\n' "$name" "$(profile_summary "$f")"
+}
+profiles_new() {
+    local name=${1:?profiles new needs a NAME} base=cpu_4h f b
+    shift || true
+    while [ $# -gt 0 ]; do case "$1" in --from) base=$2; shift ;; *) die "profiles new: unknown option $1" ;; esac; shift; done
+    [[ "$name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || die "invalid profile name: $name"
+    f=$VT_USER_PROFILES/$name.sbatch
+    [ ! -e "$f" ] || die "profile already exists: $f (vibe-tunnel profiles edit $name)"
+    b=$(resolve_profile "$base") || die "base profile not found: $base"
+    mkdir -p "$VT_USER_PROFILES"
+    sed "s/resource profile \"[^\"]*\"/resource profile \"$name\"/; s/vibe-tunnel submit [A-Za-z0-9._-]* /vibe-tunnel submit $name /" "$b" > "$f"
+    printf '  created %s from %s\n' "$f" "$base"
+    if [ -t 0 ]; then "${EDITOR:-${VISUAL:-vi}}" "$f"; fi
+    printf '  %s: %s\n' "$name" "$(profile_summary "$f")"
 }
 
 # --- doctor -----------------------------------------------------------------
