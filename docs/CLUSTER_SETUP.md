@@ -56,13 +56,12 @@ Then, on the laptop: the `code --folder-uri ...` line that `vibe-tunnel wait` pr
 
 ## 4. Things to verify on the first run
 
-Status after the first real run on Euler (2026-09-15, CLI 1.125.1 from `~/code`, euler-vibe's image 651 MB; the standalone `images/vibe-tunnel.def` has not been built on the cluster yet):
+Status after the first real run on Euler (2026-09-15, CLI 1.125.1 from `~/code`, euler-vibe's image 651 MB; the standalone `images/vibe-tunnel.def` was built on Euler on 2026-09-15 via `setup.sh` and runs tunnels):
 
 - confirmed: tunnel relay reachable from inside the container via the forwarded proxy; `vscode-remote://tunnel+NAME/workspace` opens in desktop VS Code; `~/.bashrc` block and euler-vibe shellrc active in VS Code terminals (`claude` function present); `HOME=/home` with the sandbox state; laptop-side submit / wait / open / reopen (with the earlier Python launcher; the bash client uses the same remote commands).
 - not confirmed: `--install-extension` did not preinstall Claude Code with CLI 1.125.1 (see section 6); `token.json` reuse and `unregister` on stop still to be checked in the log.
 
 Each remaining assumption has a fallback; fix the script if reality differs.
-- to do on the cluster: build `images/vibe-tunnel.sif` once with `./setup.sh --force` (or without `--euler-vibe`) and run one tunnel with it; `%test` in the recipe checks `uv`, `node` and `claude` at build time.
 
 | Assumption | Where | If wrong |
 |---|---|---|
