@@ -274,7 +274,9 @@ menu_select() {
         [ "${NEED_CLS:-0}" -eq 1 ] && full=1
         case "$key" in
             $'\x1b')
-                read -rsn2 -t 0.01 rest || true
+                # integer timeout: bash 3.2 (macOS) rejects fractional ones; the bytes
+                # of an arrow key are already buffered, so this never waits in practice
+                read -rsn2 -t 1 rest || true
                 case "$rest" in
                     '[A') sel=$(( (sel - 1 + n) % n )) ;;
                     '[B') sel=$(( (sel + 1) % n )) ;;
