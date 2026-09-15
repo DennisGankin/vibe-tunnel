@@ -185,6 +185,11 @@ async function launchConfig(item?: ConfigItem): Promise<void> {
     const pick = await vscode.window.showQuickPick(list.map(c => ({ label: c.name, description: c.workspace, name: c.name })), { placeHolder: 'Config to launch' });
     name = pick?.name; if (!name) { return; }
   }
+  await launchByName(name);
+}
+
+/** Launch a saved config; asks for a resource profile when the config has none (e.g. claude-launch configs). */
+async function launchByName(name: string): Promise<void> {
   const detail = await cluster.configShow(name);
   if (detail.mode !== 'tunnel') {
     const pick = await vscode.window.showInformationMessage(`Config "${name}" is a ${detail.mode} config (no VS Code tunnel). Run it in a terminal?`, 'Open terminal');
@@ -193,7 +198,7 @@ async function launchConfig(item?: ConfigItem): Promise<void> {
   }
   if (!detail.profile) {
     const p = await pickProfile(''); if (!p) { return; }
-    await submitAndWait(['--config', name, p]);
+    await submitAndWait([p, '--config', name]);
   } else {
     await submitAndWait(['--config', name]);
   }
@@ -263,7 +268,7 @@ async function newTunnel(): Promise<void> {
   }
   const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Start a new tunnel from…', matchOnDescription: true });
   if (!pick) { return; }
-  if (pick.action === 'launch') { await submitAndWait(['--config', pick.name!]); return; }
+  if (pick.action === 'launch') { await launchByName(pick.name!); return; }
   const base: ConfigDetail = pick.action === 'adjust' ? await cluster.configShow(pick.name!) : {
     name: '', file: '', source: '', workspace: '', mode: 'tunnel', home: '', profile: '', label: '',
     time: '', cpus: '', mem: '', gpus: '', partition: '', account: '', rw: [], ro: [],
