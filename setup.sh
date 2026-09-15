@@ -50,7 +50,8 @@ confirm() {
 usage() {
     cat <<USAGE
 Usage: ./setup.sh [options]                 (on the cluster)
-       ./setup.sh --client [--host H] [--remote-dir DIR] [--open-with code|browser|none]   (on your laptop)
+       ./setup.sh --client [--host H] [--remote-dir DIR] [--open-with code|browser|none] [--no-remote-setup]
+                                                     (on your laptop; also runs DIR/setup.sh on the cluster)
   --image FILE       use this container image instead of building images/vibe-tunnel.sif
   --euler-vibe DIR   reuse the claude-mobile.sif (and sandbox home) of an euler-vibe checkout
   --no-build         skip building the image
@@ -65,6 +66,7 @@ USAGE
 while [ $# -gt 0 ]; do
     case "$1" in
         --client)  CLIENT=1 ;;
+        --no-remote-setup) CLIENT_ARGS+=("$1") ;;
         --host|--remote-dir|--open-with) CLIENT_ARGS+=("$1" "$2"); shift ;;
         --euler-vibe) shift; EULER_VIBE_DIR=$1 ;;
         --image)   shift; IMAGE=$1 ;;
@@ -107,7 +109,8 @@ if [ "$CLIENT" -eq 1 ] || { ! command -v sbatch >/dev/null 2>&1 && [ -z "${VT_ON
     # macOS default shell is zsh; pick the rc file that matches unless --rc was given.
     [ -n "${RC_FILE_SET:-}" ] || case "${SHELL:-}" in */zsh) RC_FILE=$HOME/.zshrc ;; esac
     [ "$DO_PATH" -eq 1 ] && add_path_block
-    step "Client settings"
+    step "Client settings + cluster-side setup"
+    [ "$YES" -eq 1 ] && CLIENT_ARGS+=(--yes)
     "$REPO/bin/vibe-tunnel-client" client-setup "${CLIENT_ARGS[@]+"${CLIENT_ARGS[@]}"}"
     step "Done"
     say "  Start a new shell (or: source $RC_FILE), then run:  ${CYAN}vibe-tunnel${RST}"
