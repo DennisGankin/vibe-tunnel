@@ -28,7 +28,7 @@ No new container image: the VS Code CLI is a static binary that gets bind-mounte
 
 ## What you get
 
-- **Sandbox = your `claude-launch` config.** Pick a saved config (workspace, home, ro/rw binds) and the tunnel job uses exactly that sandbox. Or pass `--workspace`, `--rw`, `--ro` directly.
+- **Sandbox configs.** `vibe-tunnel launch` assembles workspace, home, ro/rw binds, resource profile and label in one menu and saves them as named configs. Configs saved with euler-vibe's `claude-launch` are read as well. Or pass `--workspace`, `--rw`, `--ro` directly.
 - **Persistent home.** Auth for Claude, the VS Code login, the downloaded VS Code server and extensions live in the sandbox home (`/home` in the container), so the second start is fast and needs no logins.
 - **Several tunnels at once**, each with its own label, node and resources. Reopen a running one instead of resubmitting.
 - **Resource profiles** are plain sbatch files in `profiles/` (edited locally, synced to the cluster on each start) or `~/.vibe-tunnel/profiles/` on the cluster.
@@ -74,12 +74,19 @@ python vibe_tunnel.py stop llmag
 
 ### From a login node instead
 ```bash
-vibe-tunnel submit cpu_4h --config myproj --name test
-vibe-tunnel logs <jobid> -f          # wait for "Open this link in your browser …"
-vibe-tunnel status
-vibe-tunnel stop test
+vibe-tunnel launch                   # arrow-key menu: workspace, home, binds, profile, label -> submit + wait
 ```
-Then on the laptop: `code --folder-uri 'vscode-remote://tunnel+test/workspace'` or open the printed vscode.dev link.
+The menu shows the whole setup at once (like euler-vibe's `claude-launch`, which it is adapted from), Tab-completes
+cluster paths, and can save the setup as a named config. Saved configs live in
+`~/.config/vibe-tunnel/configs/NAME.conf` and include the resource profile and label, so a later start is just:
+```bash
+vibe-tunnel submit --config myproj   # profile + label come from the config; flags override
+vibe-tunnel wait <jobid>             # prints TUNNEL= / LINK= / DESKTOP= once the tunnel is up
+vibe-tunnel status
+vibe-tunnel stop myproj
+```
+Configs saved earlier with `claude-launch` are picked up as well (read-only, shown as "from claude-launch").
+Then on the laptop: `code --folder-uri 'vscode-remote://tunnel+myproj/workspace'` or open the printed vscode.dev link.
 
 ## Inside the container
 
@@ -104,14 +111,15 @@ vibe_tunnel.py            laptop launcher (stdlib only; uses your ssh)
 vibe_tunnel.cfg.example   laptop settings (host, remote_dir, how to open)
 profiles/*.sbatch         resource profiles: #SBATCH lines + exec bin/vibe-tunnel-job
 setup.sh                  cluster: find euler-vibe, download VS Code CLI, write ~/.vibe-tunnel/env
-bin/vibe-tunnel           cluster CLI: submit / status / show / logs / stop / configs / profiles / doctor
+bin/vibe-tunnel           cluster CLI: launch / submit / wait / status / show / logs / stop / configs / profiles / doctor
+bin/vibe-tunnel-launch    the interactive menu behind `vibe-tunnel launch` (adapted from claude-launch)
 bin/vibe-tunnel-job       runs in the slurm job on the host: resolves the sandbox, starts the container
 bin/vibe-tunnel-entry     runs inside the container: home bootstrap, token seeding, `code tunnel`
 docs/CLUSTER_SETUP.md     cluster steps, design notes, things to verify on first use
 cli/code                  VS Code CLI binary (downloaded by setup.sh, gitignored)
 ```
 
-Cluster-side state lives in `~/.vibe-tunnel/`: `env` (site settings), `logs/<jobid>.log` (the job log the launcher polls), `jobs/*.env` (per-submission settings), `profiles/` (your own sbatch profiles).
+Cluster-side state lives in `~/.vibe-tunnel/`: `env` (site settings), `logs/<jobid>.log` (the job log the launcher polls), `jobs/*.env` (per-submission settings), `profiles/` (your own sbatch profiles), `last-job` (most recent submission). Saved configs are in `~/.config/vibe-tunnel/configs/`.
 
 ## How the pieces map to the two original projects
 

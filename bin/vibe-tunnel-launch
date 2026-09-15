@@ -1,0 +1,551 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# vibe-tunnel-launch ---------------------------------------------------------
+# Interactive front-end for `vibe-tunnel submit`, run on the cluster (directly
+# on a login node, or from the laptop client over `ssh -t`). Arrow-key menu that
+# shows the whole setup at once -- workspace, sandbox home, extra read-only /
+# read-write directories (Tab completion), resource profile, tunnel label --
+# lets you save/reuse it as a named config, then submits the job and waits for
+# the tunnel link. Adapted from euler-vibe's claude-launch (MIT, jurgjn).
+#
+#   vibe-tunnel launch [--config NAME] [--no-wait]
+#
+# --no-wait returns right after the submission (the laptop client waits itself
+# so it can open VS Code locally); the submitted job is in $VT_STATE_DIR/last-job.
+
+VT_LAUNCH_BIN=$(realpath "$0")
+VIBE_TUNNEL_DIR=${VIBE_TUNNEL_DIR:-$(dirname "$(dirname "$VT_LAUNCH_BIN")")}
+VT=$VIBE_TUNNEL_DIR/bin/vibe-tunnel
+VT_STATE_DIR=${VT_STATE_DIR:-$HOME/.vibe-tunnel}
+VT_CONFIG_DIR=${VT_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibe-tunnel/configs}
+CLAUDE_LAUNCH_CONFIG_DIR=${CLAUDE_LAUNCH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-launch/configs}
+
+MODE=tunnel
+WORKSPACE=$(pwd)
+CLAUDE_MOBILE_HOME=${VT_DEFAULT_HOME:-}
+PROFILE=
+LABEL=
+RW_BINDS=()
+RO_BINDS=()
+NO_WAIT=0
+PRELOAD=
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --no-wait) NO_WAIT=1 ;;
+        --config)  shift; PRELOAD=${1:-} ;;
+        -h|--help) sed -n '4,16p' "$VT_LAUNCH_BIN" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "vibe-tunnel launch: unknown option $1" >&2; exit 1 ;;
+    esac
+    shift
+done
+
+# --- colors / terminal control --------------------------------------------
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    BOLD=$'\033[1m'; DIM=$'\033[2m'; RST=$'\033[0m'
+    CYAN=$'\033[36m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'
+    BLUE=$'\033[34m'; RED=$'\033[31m'; GREY=$'\033[90m'; MAG=$'\033[35m'
+    EL=$'\033[K'
+else
+    BOLD= DIM= RST= CYAN= GREEN= YELLOW= BLUE= RED= GREY= MAG= EL=
+fi
+
+home_cur()  { printf '\033[H'; }
+clr_down()  { printf '\033[0J'; }
+cls()       { [ -t 1 ] && printf '\033[2J\033[3J\033[H' || true; }
+show_cursor() { [ -t 1 ] && printf '\033[?25h' || true; }
+hide_cursor() { [ -t 1 ] && printf '\033[?25l' || true; }
+trap 'show_cursor; printf "\n"' EXIT INT TERM
+NEED_CLS=0
+trap 'NEED_CLS=1' WINCH
+
+term_rows() {
+    local r
+    r=$(tput lines 2>/dev/null) || r=""
+    [ -n "$r" ] && [ "$r" -gt 0 ] 2>/dev/null || r=24
+    printf '%s' "$r"
+}
+
+header_lines() {
+    local rw=${#RW_BINDS[@]} ro=${#RO_BINDS[@]} cap=${HEADER_BIND_CAP:-0}
+    if [ "$cap" -gt 0 ]; then
+        [ "$rw" -gt "$cap" ] && rw=$((cap + 1))
+        [ "$ro" -gt "$cap" ] && ro=$((cap + 1))
+    fi
+    [ "$rw" -gt 0 ] || rw=1
+    [ "$ro" -gt 0 ] || ro=1
+    if [ "${HEADER_COMPACT:-0}" -eq 1 ]; then
+        printf '%s' $((8 + rw + ro))
+    else
+        printf '%s' $((18 + rw + ro))
+    fi
+}
+
+# --- helpers ---------------------------------------------------------------
+expand_path() {
+    local p=$1
+    case "$p" in
+        "~") p=$HOME ;;
+        "~/"*) p=$HOME/${p#"~/"} ;;
+    esac
+    realpath -m -- "$p" 2>/dev/null || { case "$p" in /*) printf '%s' "$p" ;; *) printf '%s/%s' "$(pwd)" "$p" ;; esac; }
+}
+
+tilde() {
+    local p=$1
+    case "$p" in
+        "$HOME") printf '~' ;;
+        "$HOME"/*) printf '~/%s' "${p#"$HOME"/}" ;;
+        *) printf '%s' "$p" ;;
+    esac
+}
+
+prompt_dir() {
+    local label=$1 allow_missing=${2:-} reply
+    show_cursor
+    read -e -r -p "$(printf '%s%s%s (Tab completes, empty to cancel): ' "$BOLD" "$label" "$RST")" reply || return 1
+    [ -n "$reply" ] || return 1
+    reply=$(expand_path "$reply")
+    if [ ! -d "$reply" ] && [ -z "$allow_missing" ]; then
+        printf '%s  ! Not a directory: %s%s\n' "$RED" "$reply" "$RST" >&2
+        sleep 1
+        return 1
+    fi
+    printf '%s\n' "$reply"
+}
+
+prompt_dest() {
+    local src=$1 dest
+    show_cursor
+    read -e -r -p "  Mount inside container as [default: $src]: " dest || true
+    if [ -n "${dest:-}" ]; then printf '%s:%s\n' "$src" "$dest"; else printf '%s\n' "$src"; fi
+}
+
+pause() { show_cursor; read -r -p "$(printf '%s  (press Enter to continue)%s ' "$DIM" "$RST")" _ || true; }
+
+# --- profiles ----------------------------------------------------------------
+PROFILE_NAMES=() PROFILE_SUMMARIES=()
+load_profiles() {
+    PROFILE_NAMES=() PROFILE_SUMMARIES=()
+    local n f s
+    while IFS='|' read -r n f s; do
+        [ -n "$n" ] || continue
+        PROFILE_NAMES+=("$n"); PROFILE_SUMMARIES+=("$s")
+    done < <("$VT" profiles --porcelain 2>/dev/null || true)
+}
+profile_summary() {
+    local i
+    for i in "${!PROFILE_NAMES[@]}"; do
+        [ "${PROFILE_NAMES[$i]}" = "$1" ] && { printf '%s' "${PROFILE_SUMMARIES[$i]}"; return; }
+    done
+    printf '%s' "(unknown profile)"
+}
+
+# --- arrow-key menu --------------------------------------------------------
+# menu_select "Prompt" "opt1" "opt2" ... -> MENU_CHOICE (0-based, -2 on q).
+menu_select() {
+    local prompt=$1; shift
+    local options=("$@")
+    local n=${#options[@]}
+    local sel=${MENU_DEFAULT:-0}
+    MENU_DEFAULT=0
+
+    if [ ! -t 0 ]; then
+        render_header
+        echo "$prompt"
+        local i=1; for o in "${options[@]}"; do printf '  %d) %s\n' "$i" "$o"; i=$((i+1)); done
+        local choice; read -r -p "  Choose: " choice || { MENU_CHOICE=$((n-1)); return; }
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le "$n" ]; then
+            MENU_CHOICE=$((choice-1)); else MENU_CHOICE=-1; fi
+        return
+    fi
+
+    hide_cursor
+    local key rest i rows avail h vis start cap
+    while true; do
+        rows=$(term_rows)
+        avail=$((rows - 1))
+        HEADER_COMPACT=0
+        HEADER_BIND_CAP=0
+        h=$(header_lines)
+        if [ $((h + 3 + n)) -gt "$avail" ]; then
+            HEADER_COMPACT=1
+            h=$(header_lines)
+        fi
+        if [ $((h + 6)) -gt "$avail" ]; then
+            for cap in 8 6 4 3 2 1; do
+                HEADER_BIND_CAP=$cap
+                h=$(header_lines)
+                [ $((h + 6)) -le "$avail" ] && break
+            done
+        fi
+        vis=$((avail - h - 3))
+        [ "$vis" -lt "$n" ] && vis=$((vis - 2))
+        [ "$vis" -lt 3 ] && vis=3
+        [ "$vis" -gt "$n" ] && vis=$n
+        start=0
+        if [ "$vis" -lt "$n" ]; then
+            start=$((sel - vis / 2))
+            [ "$start" -lt 0 ] && start=0
+            [ "$start" -gt $((n - vis)) ] && start=$((n - vis))
+        fi
+        if [ $((h + 3 + vis + 2)) -gt "$avail" ]; then NEED_CLS=1; fi
+        if [ "${NEED_CLS:-0}" -eq 1 ]; then cls; NEED_CLS=0; fi
+        render_header
+        printf '  %s%s%s%s\n' "$DIM" "$prompt" "$RST" "$EL"
+        printf '  %s↑/↓ move · enter select · q quit%s%s\n\n' "$GREY" "$RST" "$EL"
+        [ "$start" -gt 0 ] && printf '   %s↑ %d more%s%s\n' "$GREY" "$start" "$RST" "$EL"
+        for (( i = start; i < start + vis; i++ )); do
+            if [ "$i" -eq "$sel" ]; then
+                printf '   %s●%s %s%s%s%s\n' "$GREEN" "$RST" "$BOLD" "${options[$i]}" "$RST" "$EL"
+            else
+                printf '   %s·%s %s%s%s%s\n' "$GREY" "$RST" "$DIM" "${options[$i]}" "$RST" "$EL"
+            fi
+        done
+        [ $((start + vis)) -lt "$n" ] && printf '   %s↓ %d more%s%s\n' "$GREY" $((n - start - vis)) "$RST" "$EL"
+        clr_down
+        IFS= read -rsn1 key || true
+        case "$key" in
+            $'\x1b')
+                read -rsn2 -t 0.01 rest || true
+                case "$rest" in
+                    '[A') sel=$(( (sel - 1 + n) % n )) ;;
+                    '[B') sel=$(( (sel + 1) % n )) ;;
+                esac ;;
+            k|K) sel=$(( (sel - 1 + n) % n )) ;;
+            j|J) sel=$(( (sel + 1) % n )) ;;
+            q|Q) MENU_CHOICE=-2; show_cursor; return ;;
+            '')  MENU_CHOICE=$sel; show_cursor; return ;;
+        esac
+    done
+}
+
+# --- header ------------------------------------------------------------------
+print_binds() {
+    local color=$1; shift
+    local arr=("$@")
+    local cap=${HEADER_BIND_CAP:-0} total=${#arr[@]} shown i
+    if [ "$total" -eq 0 ]; then
+        printf '    %s(none)%s%s\n' "$DIM" "$RST" "$EL"
+        return 0
+    fi
+    shown=$total
+    [ "$cap" -gt 0 ] && [ "$shown" -gt "$cap" ] && shown=$cap
+    for (( i = 0; i < shown; i++ )); do
+        printf '    %s●%s %s%s\n' "$color" "$RST" "${arr[$i]}" "$EL"
+    done
+    if [ "$shown" -lt "$total" ]; then
+        printf '    %s… %d more%s%s\n' "$GREY" $((total - shown)) "$RST" "$EL"
+    fi
+    return 0
+}
+
+profile_line() {
+    if [ -n "$PROFILE" ]; then printf '%s%s%s  %s%s%s' "$MAG" "$PROFILE" "$RST" "$DIM" "$(profile_summary "$PROFILE")" "$RST"
+    else printf '%s(none chosen)%s' "$RED" "$RST"; fi
+}
+label_line() {
+    if [ -n "$LABEL" ]; then printf '%s%s%s  %s→ vscode-remote://tunnel+%s/workspace%s' "$GREEN" "$LABEL" "$RST" "$DIM" "$LABEL" "$RST"
+    else printf '%s(none: vibe-<jobid>)%s' "$DIM" "$RST"; fi
+}
+
+render_header_compact() {
+    printf '  %s● vibe-tunnel%s  %s·%s  %s%s%s%s\n' "$BOLD$GREEN" "$RST" "$DIM" "$RST" "$GREEN" "$MODE" "$RST" "$EL"
+    printf '  %sWorkspace%s %s%s%s%s\n' "$BOLD" "$RST" "$YELLOW" "$(tilde "$WORKSPACE")" "$RST" "$EL"
+    printf '  %sHome%s      %s%s%s%s\n' "$BOLD" "$RST" "$CYAN" "$(tilde "$CLAUDE_MOBILE_HOME")" "$RST" "$EL"
+    printf '  %sProfile%s   %s%s\n' "$BOLD" "$RST" "$(profile_line)" "$EL"
+    printf '  %sLabel%s     %s%s\n' "$BOLD" "$RST" "$(label_line)" "$EL"
+    printf '  %sRead-write dirs%s%s\n' "$BOLD" "$RST" "$EL"
+    print_binds "$GREEN" "${RW_BINDS[@]+"${RW_BINDS[@]}"}"
+    printf '  %sRead-only dirs%s%s\n' "$BOLD" "$RST" "$EL"
+    print_binds "$BLUE" "${RO_BINDS[@]+"${RO_BINDS[@]}"}"
+    printf '%s\n' "$EL"
+}
+
+render_header() {
+    home_cur
+    if [ "${HEADER_COMPACT:-0}" -eq 1 ]; then render_header_compact; return; fi
+    printf '  %s╭────────────────────────────────────────────────────────────╮%s%s\n' "$CYAN" "$RST" "$EL"
+    printf '  %s│%s  %s● vibe-tunnel%s   %sVS Code + Claude inside the sandbox, on a node%s  %s│%s%s\n' \
+        "$CYAN" "$RST" "$BOLD$GREEN" "$RST" "$DIM" "$RST" "$CYAN" "$RST" "$EL"
+    printf '  %s╰────────────────────────────────────────────────────────────╯%s%s\n' "$CYAN" "$RST" "$EL"
+    printf '%s\n' "$EL"
+    printf '  %sMode%s       %s%s%s%s\n' "$BOLD" "$RST" "$GREEN" "$MODE" "$RST" "$EL"
+    printf '%s\n' "$EL"
+    printf '  %sWorkspace%s  %s%s%s%s\n' "$BOLD" "$RST" "$YELLOW" "$(tilde "$WORKSPACE")" "$RST" "$EL"
+    printf '             %s↳ /workspace in the container: VS Code opens here, Claude can read & edit%s%s\n' "$DIM" "$RST" "$EL"
+    printf '%s\n' "$EL"
+    printf '  %sHome%s       %s%s%s%s\n' "$BOLD" "$RST" "$CYAN" "$(tilde "$CLAUDE_MOBILE_HOME")" "$RST" "$EL"
+    printf '             %s↳ persistent /home: Claude + VS Code logins, extensions, shell config%s%s\n' "$DIM" "$RST" "$EL"
+    printf '%s\n' "$EL"
+    printf '  %sProfile%s    %s%s\n' "$BOLD" "$RST" "$(profile_line)" "$EL"
+    printf '  %sLabel%s      %s%s\n' "$BOLD" "$RST" "$(label_line)" "$EL"
+    printf '%s\n' "$EL"
+    printf '  %sRead-write dirs%s  %s(Claude can read & write files here)%s%s\n' "$BOLD" "$RST" "$DIM" "$RST" "$EL"
+    print_binds "$GREEN" "${RW_BINDS[@]+"${RW_BINDS[@]}"}"
+    printf '  %sRead-only dirs%s   %s(Claude can only read from here)%s%s\n' "$BOLD" "$RST" "$DIM" "$RST" "$EL"
+    print_binds "$BLUE" "${RO_BINDS[@]+"${RO_BINDS[@]}"}"
+    printf '%s\n' "$EL"
+}
+
+# --- actions -----------------------------------------------------------------
+build_submit_args() {
+    local b
+    printf '%s\n' "$PROFILE"
+    printf '%s\n%s\n' "--workspace" "$WORKSPACE"
+    [ -z "$CLAUDE_MOBILE_HOME" ] || printf '%s\n%s\n' "--home" "$CLAUDE_MOBILE_HOME"
+    for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do printf '%s\n%s\n' "--rw" "$b"; done
+    for b in "${RO_BINDS[@]+"${RO_BINDS[@]}"}"; do printf '%s\n%s\n' "--ro" "$b"; done
+    [ -z "$LABEL" ] || printf '%s\n%s\n' "--name" "$LABEL"
+}
+
+review_command() {
+    render_header
+    printf '  %sWould run:%s%s\n' "$BOLD" "$RST" "$EL"
+    printf '    %svibe-tunnel submit%s' "$CYAN" "$RST"
+    while IFS= read -r a; do printf ' %q' "$a"; done < <(build_submit_args)
+    printf '%s\n%s\n' "$EL" "$EL"
+    printf '  %sThe job then starts the container with these mounts and runs `code tunnel` inside it.%s%s\n' "$DIM" "$RST" "$EL"
+    clr_down
+    pause
+}
+
+remove_bind() {
+    [ ${#RW_BINDS[@]} -gt 0 ] || [ ${#RO_BINDS[@]} -gt 0 ] || { render_header; echo "  (no extra binds to remove)"; clr_down; pause; return; }
+    local labels=() map=() i
+    for i in "${!RW_BINDS[@]}"; do labels+=("rw: ${RW_BINDS[$i]}"); map+=("w:$i"); done
+    for i in "${!RO_BINDS[@]}"; do labels+=("ro: ${RO_BINDS[$i]}"); map+=("r:$i"); done
+    labels+=("(cancel)"); map+=("cancel")
+    menu_select "Select a bind to remove:" "${labels[@]}"
+    [ "${MENU_CHOICE}" -ge 0 ] 2>/dev/null || return
+    local entry=${map[$MENU_CHOICE]}
+    case "$entry" in
+        cancel) return ;;
+        w:*) local idx=${entry#w:}; unset 'RW_BINDS[idx]'; RW_BINDS=("${RW_BINDS[@]+"${RW_BINDS[@]}"}") ;;
+        r:*) local idx=${entry#r:}; unset 'RO_BINDS[idx]'; RO_BINDS=("${RO_BINDS[@]+"${RO_BINDS[@]}"}") ;;
+    esac
+}
+
+change_profile() {
+    load_profiles
+    if [ ${#PROFILE_NAMES[@]} -eq 0 ]; then
+        render_header
+        printf '  %sNo sbatch profiles found. Add one to %s/profiles/ or %s/profiles/.%s\n' "$RED" "$VIBE_TUNNEL_DIR" "$VT_STATE_DIR" "$RST"
+        clr_down; pause; return
+    fi
+    local labels=() i
+    for i in "${!PROFILE_NAMES[@]}"; do
+        labels+=("$(printf '%-18s %s' "${PROFILE_NAMES[$i]}" "${PROFILE_SUMMARIES[$i]}")")
+        [ "${PROFILE_NAMES[$i]}" = "$PROFILE" ] && MENU_DEFAULT=$i
+    done
+    labels+=("(cancel)")
+    menu_select "Pick the resources (sbatch profile) for the job:" "${labels[@]}"
+    [ "${MENU_CHOICE}" -ge 0 ] 2>/dev/null || return
+    [ "${MENU_CHOICE}" -lt "${#PROFILE_NAMES[@]}" ] || return
+    PROFILE=${PROFILE_NAMES[$MENU_CHOICE]}
+}
+
+set_label() {
+    render_header
+    local reply
+    show_cursor
+    read -e -r -p "$(printf '%sTunnel label%s (a-z, 0-9, -; max 20; empty = none): ' "$BOLD" "$RST")" reply || return
+    reply=$(printf '%s' "$reply" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed 's/^-*//; s/-*$//; s/--*/-/g')
+    LABEL=${reply:0:20}
+}
+
+# --- saved configurations --------------------------------------------------
+config_path() { printf '%s/%s.conf' "$VT_CONFIG_DIR" "$1"; }
+
+find_config() {
+    local n=$1 d
+    for d in "$VT_CONFIG_DIR" "$CLAUDE_LAUNCH_CONFIG_DIR"; do
+        [ -f "$d/$n.conf" ] && { printf '%s' "$d/$n.conf"; return; }
+    done
+    return 1
+}
+
+config_is_valid() {
+    local line
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            ''|'#'*) ;;
+            WORKSPACE=*|MODE=*|CLAUDE_MOBILE_HOME=*|'RW_BINDS=('*|'RO_BINDS=('*|PROFILE=*|LABEL=*) ;;
+            *) return 1 ;;
+        esac
+    done < "$1"
+    return 0
+}
+
+# CONFIG_NAMES / CONFIG_LABELS from `vibe-tunnel configs --porcelain` (own + claude-launch).
+CONFIG_NAMES=() CONFIG_LABELS=()
+list_configs() {
+    CONFIG_NAMES=() CONFIG_LABELS=()
+    local n ws hd pr lb src
+    while IFS='|' read -r n ws hd pr lb src; do
+        [ -n "$n" ] || continue
+        CONFIG_NAMES+=("$n")
+        CONFIG_LABELS+=("$(printf '%-16s %s%s%s' "$n" "$(tilde "$ws")" "${pr:+  [$pr]}" "$([ "$src" = claude-launch ] && printf '  (claude-launch)')")")
+    done < <("$VT" configs --porcelain 2>/dev/null || true)
+}
+
+load_config_file() {
+    local f=$1
+    config_is_valid "$f" || return 1
+    local saved_home=$CLAUDE_MOBILE_HOME
+    RW_BINDS=(); RO_BINDS=(); PROFILE=; LABEL=
+    # shellcheck disable=SC1090
+    . "$f"
+    MODE=tunnel
+    [ -n "$CLAUDE_MOBILE_HOME" ] || CLAUDE_MOBILE_HOME=$saved_home
+    return 0
+}
+
+save_config_file() {
+    local name=$1 f b
+    f=$(config_path "$name")
+    mkdir -p "$VT_CONFIG_DIR"
+    {
+        printf '# vibe-tunnel config: %s\n' "$name"
+        printf '# saved %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+        printf 'WORKSPACE=%q\n' "$WORKSPACE"
+        printf 'MODE=%q\n' "$MODE"
+        printf 'CLAUDE_MOBILE_HOME=%q\n' "$CLAUDE_MOBILE_HOME"
+        printf 'PROFILE=%q\n' "$PROFILE"
+        printf 'LABEL=%q\n' "$LABEL"
+        printf 'RW_BINDS=('; for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do printf ' %q' "$b"; done; printf ' )\n'
+        printf 'RO_BINDS=('; for b in "${RO_BINDS[@]+"${RO_BINDS[@]}"}"; do printf ' %q' "$b"; done; printf ' )\n'
+    } > "$f"
+}
+
+prompt_config_name() {
+    local reply
+    show_cursor
+    read -e -r -p "$(printf '%sConfig name%s (letters, digits, . _ - ; empty to cancel): ' "$BOLD" "$RST")" reply || return 1
+    [ -n "$reply" ] || return 1
+    if ! [[ "$reply" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        printf '%s  ! Invalid name: %s%s\n' "$RED" "$reply" "$RST" >&2
+        sleep 1
+        return 1
+    fi
+    printf '%s\n' "$reply"
+}
+
+save_config() {
+    render_header
+    local name
+    name=$(prompt_config_name) || return
+    if [ -e "$(config_path "$name")" ]; then
+        MENU_DEFAULT=1
+        menu_select "Config '$name' already exists — overwrite it?" \
+            "Overwrite '$name'" \
+            "Cancel (keep the existing config)"
+        [ "${MENU_CHOICE}" -eq 0 ] || return
+    fi
+    save_config_file "$name"
+    render_header
+    printf '  %s✓ Saved config %s%s%s%s\n' "$GREEN" "$BOLD" "$name" "$RST" "$EL"
+    printf '  %s%s%s%s\n' "$DIM" "$(config_path "$name")" "$RST" "$EL"
+    printf '  %sLater: vibe-tunnel submit --config %s   or pick it under "Reuse a saved config".%s%s\n' "$DIM" "$name" "$RST" "$EL"
+    clr_down
+    pause
+}
+
+reuse_config() {
+    list_configs
+    if [ ${#CONFIG_NAMES[@]} -eq 0 ]; then
+        render_header
+        printf '  %sNo saved configs yet — use "Save current config" first.%s%s\n' "$DIM" "$RST" "$EL"
+        printf '  %sConfig dir: %s%s%s\n' "$DIM" "$VT_CONFIG_DIR" "$RST" "$EL"
+        clr_down; pause; return
+    fi
+    local labels=("${CONFIG_LABELS[@]}" "(cancel)")
+    menu_select "Pick a config to load:" "${labels[@]}"
+    [ "${MENU_CHOICE}" -ge 0 ] 2>/dev/null || return
+    [ "${MENU_CHOICE}" -lt "${#CONFIG_NAMES[@]}" ] || return
+    local name=${CONFIG_NAMES[$MENU_CHOICE]} f
+    f=$(find_config "$name") || return
+    if ! load_config_file "$f"; then
+        render_header
+        printf '%s  ! %s has unexpected content and was not loaded.%s%s\n' "$RED" "$f" "$RST" "$EL"
+        clr_down; pause; return
+    fi
+    render_header
+    printf '  %s✓ Loaded config %s%s%s — adjust anything, then Launch%s\n' "$GREEN" "$BOLD" "$name" "$RST" "$EL"
+    clr_down
+    pause
+}
+
+# --- launch --------------------------------------------------------------------
+launch() {
+    if [ -z "$PROFILE" ]; then
+        change_profile
+        [ -n "$PROFILE" ] || return
+    fi
+    local args=() out rc=0
+    while IFS= read -r a; do args+=("$a"); done < <(build_submit_args)
+    render_header
+    printf '  %sSubmitting…%s%s\n' "$GREEN" "$RST" "$EL"
+    clr_down
+    show_cursor
+    out=$("$VT" submit "${args[@]}" 2>&1) || rc=$?
+    if [ "$rc" -ne 0 ]; then
+        render_header
+        printf '  %s! Submission failed:%s%s\n' "$RED" "$RST" "$EL"
+        printf '%s\n' "$out" | sed "s/^/    /"
+        clr_down; pause; return
+    fi
+    cls
+    printf '%s\n\n' "$out"
+    local job_id
+    job_id=$(awk '{print $1}' "$VT_STATE_DIR/last-job" 2>/dev/null || true)
+    if [ "$NO_WAIT" -eq 1 ] || [ -z "$job_id" ]; then
+        exit 0
+    fi
+    printf '  %sWaiting for the tunnel (Ctrl-C stops waiting; the job keeps running)…%s\n\n' "$DIM" "$RST"
+    trap - EXIT
+    exec "$VT" wait "$job_id"
+}
+
+# --- main ----------------------------------------------------------------------
+[ -x "$VT" ] || { echo "vibe-tunnel not found at $VT" >&2; exit 1; }
+load_profiles
+# Sensible defaults: first profile, and a preloaded config if asked for.
+[ ${#PROFILE_NAMES[@]} -gt 0 ] && PROFILE=${PROFILE_NAMES[0]}
+if [ -n "$PRELOAD" ]; then
+    f=$(find_config "$PRELOAD") || { echo "config not found: $PRELOAD" >&2; exit 1; }
+    load_config_file "$f" || { echo "config has unexpected content: $f" >&2; exit 1; }
+fi
+
+cls
+while true; do
+    menu_select "Main menu:" \
+        "Change workspace directory" \
+        "Change home directory (persistent logins & state)" \
+        "Add read-write directory" \
+        "Add read-only directory" \
+        "Remove an extra bind" \
+        "Change resource profile (CPUs, GPUs, time)" \
+        "Set tunnel label" \
+        "Reuse a saved config" \
+        "Save current config" \
+        "Review submit command" \
+        "Launch ▶" \
+        "Quit"
+    case "${MENU_CHOICE}" in
+        0) if ws=$(prompt_dir "Workspace directory"); then WORKSPACE=$ws; fi ;;
+        1) if hd=$(prompt_dir "Home directory" allow-missing); then CLAUDE_MOBILE_HOME=$hd; fi ;;
+        2) if src=$(prompt_dir "Read-write directory"); then RW_BINDS+=("$(prompt_dest "$src")"); fi ;;
+        3) if src=$(prompt_dir "Read-only directory"); then RO_BINDS+=("$(prompt_dest "$src")"); fi ;;
+        4) remove_bind ;;
+        5) change_profile ;;
+        6) set_label ;;
+        7) reuse_config ;;
+        8) save_config ;;
+        9) review_command ;;
+        10) launch ;;
+        11|-2) cls; printf '%s  Bye.%s\n' "$DIM" "$RST"; exit 0 ;;
+        *) : ;;
+    esac
+done

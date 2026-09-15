@@ -6,19 +6,24 @@ set -euo pipefail
 # Claude container on a compute node and runs a VS Code tunnel *inside* it,
 # so VS Code (desktop or vscode.dev) attaches straight into the sandbox.
 #
-#   vibe-tunnel submit PROFILE [--name LABEL] [--config CLAUDE_LAUNCH_CONFIG]
+#   vibe-tunnel launch [--no-wait]        interactive menu: sandbox, resources, label -> submit
+#   vibe-tunnel submit [PROFILE] [--name LABEL] [--config NAME]
 #                              [--workspace DIR] [--home DIR]
 #                              [--rw DIR[:DEST]]... [--ro DIR[:DEST]]...
 #                              [--extensions ID,ID] [--json]
+#   vibe-tunnel wait JOBID                block until the tunnel link appears, print it
 #   vibe-tunnel status [--porcelain]      running tunnels + their links
 #   vibe-tunnel show JOBID                state, node and the full log (machine-readable)
 #   vibe-tunnel logs JOBID [-f]           tail the job log
 #   vibe-tunnel stop JOBID|LABEL          scancel
-#   vibe-tunnel configs [--porcelain]     saved claude-launch sandbox configs
+#   vibe-tunnel configs [--porcelain]     saved sandbox configs (own + claude-launch's)
 #   vibe-tunnel profiles [--porcelain]    available sbatch resource profiles
 #   vibe-tunnel doctor                    check image, CLI, proxy, dirs
 #
-# The laptop launcher (vibe_tunnel.py) only calls these subcommands over ssh.
+# Saved configs: ${XDG_CONFIG_HOME:-~/.config}/vibe-tunnel/configs/NAME.conf, the same
+# format as claude-launch (WORKSPACE, MODE, CLAUDE_MOBILE_HOME, RW_BINDS, RO_BINDS) plus
+# PROFILE and LABEL. Existing claude-launch configs are read as a fallback.
+# The laptop client only calls these subcommands over ssh.
 
 VT_BIN=$(realpath "$0")
 VIBE_TUNNEL_DIR=$(dirname "$(dirname "$VT_BIN")")
@@ -38,10 +43,13 @@ JOB_PREFIX=vibe-tunnel
 EULER_VIBE_DIR=${EULER_VIBE_DIR:-$(dirname "$VIBE_TUNNEL_DIR")/euler-vibe}
 [ -d "$EULER_VIBE_DIR" ] || EULER_VIBE_DIR=$HOME/euler-vibe
 CLAUDE_MOBILE_IMAGE=${CLAUDE_MOBILE_IMAGE:-$EULER_VIBE_DIR/images/claude-mobile.sif}
+VT_CONFIG_DIR=${VT_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibe-tunnel/configs}
+# Legacy: configs saved by euler-vibe's claude-launch are read (never written) too.
 CLAUDE_LAUNCH_CONFIG_DIR=${CLAUDE_LAUNCH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-launch/configs}
 VT_CODE_CLI=${VT_CODE_CLI:-$VIBE_TUNNEL_DIR/cli/code}
 [ -x "$VT_CODE_CLI" ] || { [ -x "$HOME/code" ] && VT_CODE_CLI=$HOME/code; } || true
-export EULER_VIBE_DIR CLAUDE_MOBILE_IMAGE CLAUDE_LAUNCH_CONFIG_DIR VT_CODE_CLI
+VT_DEFAULT_HOME=${VT_DEFAULT_HOME:-$EULER_VIBE_DIR/home/claude-mobile}
+export VT_DEFAULT_HOME EULER_VIBE_DIR CLAUDE_MOBILE_IMAGE VT_CONFIG_DIR CLAUDE_LAUNCH_CONFIG_DIR VT_CODE_CLI VT_STATE_DIR VT_LOG_DIR
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
     BOLD=$'\033[1m'; DIM=$'\033[2m'; RST=$'\033[0m'
@@ -53,7 +61,7 @@ ok()   { printf '  %s✓%s %s\n' "$GREEN" "$RST" "$*"; }
 warn() { printf '  %s!%s %s\n' "$YELLOW" "$RST" "$*"; }
 die()  { printf '%svibe-tunnel: %s%s\n' "$RED" "$*" "$RST" >&2; exit 1; }
 
-usage() { sed -n '4,22p' "$VT_BIN" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,26p' "$VT_BIN" | sed 's/^# \{0,1\}//'; }
 
 # --- helpers ---------------------------------------------------------------
 
@@ -93,12 +101,14 @@ profile_summary() {
     ' "$1" | sed 's/ $//'
 }
 
+# Only the keys we (or claude-launch) write are allowed, so a config file stays
+# data rather than arbitrary code that sourcing would execute.
 config_is_valid() {
     local line
     while IFS= read -r line || [ -n "$line" ]; do
         case "$line" in
             ''|'#'*) ;;
-            WORKSPACE=*|MODE=*|CLAUDE_MOBILE_HOME=*|'RW_BINDS=('*|'RO_BINDS=('*) ;;
+            WORKSPACE=*|MODE=*|CLAUDE_MOBILE_HOME=*|'RW_BINDS=('*|'RO_BINDS=('*|PROFILE=*|LABEL=*) ;;
             *) return 1 ;;
         esac
     done < "$1"
@@ -106,6 +116,15 @@ config_is_valid() {
 
 config_field() {  # config_field FILE VAR
     ( set +eu; . "$1" >/dev/null 2>&1; printf '%s' "${!2:-}" )
+}
+
+# Path of a saved config by name: own dir first, then claude-launch's.
+find_config() {
+    local n=$1 d
+    for d in "$VT_CONFIG_DIR" "$CLAUDE_LAUNCH_CONFIG_DIR"; do
+        [ -f "$d/$n.conf" ] && { printf '%s' "$d/$n.conf"; return; }
+    done
+    return 1
 }
 
 # All of the user's vibe-tunnel jobs: id|name|state|node|elapsed|timeleft
@@ -140,18 +159,20 @@ cmd_submit() {
         esac
         shift
     done
+    local cf=
+    if [ -n "$config" ]; then
+        cf=$(find_config "$config") || die "config not found: $config (see: vibe-tunnel configs)"
+        config_is_valid "$cf" || die "config has unexpected content, refusing to use it: $cf"
+        # A saved config may carry its resources and label; explicit flags win.
+        [ -n "$profile" ] || profile=$(config_field "$cf" PROFILE)
+        [ -n "$label" ]   || label=$(config_field "$cf" LABEL)
+    fi
     [ -n "$profile" ] || die "submit needs a PROFILE (see: vibe-tunnel profiles)"
     local profile_path
     profile_path=$(resolve_profile "$profile") || die "profile not found: $profile"
 
     [ -e "$CLAUDE_MOBILE_IMAGE" ] || die "container image missing: $CLAUDE_MOBILE_IMAGE (build euler-vibe first, see docs/CLUSTER_SETUP.md)"
     [ -x "$VT_CODE_CLI" ] || die "VS Code CLI missing: $VT_CODE_CLI (run ./setup.sh)"
-
-    if [ -n "$config" ]; then
-        local cf=$CLAUDE_LAUNCH_CONFIG_DIR/$config.conf
-        [ -f "$cf" ] || die "claude-launch config not found: $cf"
-        config_is_valid "$cf" || die "config has unexpected content, refusing to use it: $cf"
-    fi
     if [ -n "$workspace" ]; then
         [ -d "$workspace" ] || die "workspace is not a directory: $workspace"
         workspace=$(realpath -- "$workspace")
@@ -178,6 +199,7 @@ cmd_submit() {
         printf '# vibe-tunnel job settings, written %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
         printf 'VT_TUNNEL_NAME=%q\n' "$tunnel_name"
         printf 'VT_CONFIG=%q\n' "$config"
+        printf 'VT_CONFIG_FILE=%q\n' "$cf"
         printf 'VT_WORKSPACE=%q\n' "$workspace"
         printf 'VT_HOME=%q\n' "$home_dir"
         printf 'VT_EXTENSIONS=%q\n' "$extensions"
@@ -195,6 +217,7 @@ cmd_submit() {
         "$profile_path") || die "sbatch failed"
     job_id=${out%%;*}
     [ -n "$job_id" ] || die "could not read the job id from sbatch output: $out"
+    printf '%s %s %s\n' "$job_id" "$job_name" "$tunnel_name" > "$VT_STATE_DIR/last-job"
 
     if [ "$json" -eq 1 ]; then
         printf '{"job_id":"%s","job_name":"%s","tunnel_name":"%s","log":"%s","profile":"%s","config":"%s"}\n' \
@@ -274,25 +297,84 @@ cmd_stop() {
     scancel $ids && echo "cancelled: $ids"
 }
 
+# --- wait -------------------------------------------------------------------
+# Block until the job's tunnel is reachable. Prints the one-time device-code
+# login when it shows up, then TUNNEL=/LINK=/DESKTOP= lines for scripts.
+cmd_wait() {
+    local id=${1:-}; [ -n "$id" ] || die "wait needs a JOBID"
+    local poll=${VT_POLL_SECONDS:-5} log=$VT_LOG_DIR/$id.log
+    local row state node last_state= seen_codes=" " dev url code link tunnel
+    while :; do
+        row=$(squeue_jobs | awk -F'|' -v id="$id" '$1 == id')
+        if [ -n "$row" ]; then
+            IFS='|' read -r _ _ state node _ _ <<< "$row"
+        else
+            state=$(sacct -j "$id" -n -X -o State 2>/dev/null | head -n1 | tr -d ' ' || true)
+            state=${state:-UNKNOWN}
+        fi
+        if [ "$state" != "$last_state" ]; then
+            printf '  %s[%s]%s job %s: %s%s\n' "$DIM" "$(date '+%H:%M:%S')" "$RST" "$id" "$state" "${node:+ on $node}"
+            last_state=$state
+        fi
+        dev=$(log_device "$log")
+        if [ -n "$dev" ]; then
+            url=${dev% *}; code=${dev##* }
+            case "$seen_codes" in *" $code "*) ;; *)
+                seen_codes="$seen_codes$code "
+                printf '\n  %sVS Code tunnel login needed%s (once per sandbox home):\n' "$BOLD" "$RST"
+                printf '    open  %s%s%s\n    code  %s%s%s\n\n' "$CYAN" "$url" "$RST" "$BOLD" "$code" "$RST"
+                printf 'DEVICE_URL=%s\nDEVICE_CODE=%s\n' "$url" "$code" ;;
+            esac
+        fi
+        link=$(log_link "$log"); tunnel=$(log_tunnel "$log")
+        if [ -n "$link" ] && [ -n "$tunnel" ]; then
+            printf '\n  %sTunnel is up.%s\n' "$GREEN" "$RST"
+            printf 'TUNNEL=%s\nLINK=%s\nDESKTOP=code --folder-uri %q\n' "$tunnel" "$link" "vscode-remote://tunnel+$tunnel/workspace"
+            return 0
+        fi
+        case "$state" in
+            PENDING|CONFIGURING|RUNNING|COMPLETING|REQUEUED|SUSPENDED) ;;
+            *)
+                printf '\n  %sjob %s ended (%s) before the tunnel came up.%s Last log lines:\n' "$RED" "$id" "$state" "$RST"
+                [ -f "$log" ] && tail -n 20 "$log" | sed 's/^/    /'
+                return 1 ;;
+        esac
+        sleep "$poll"
+    done
+}
+
+cmd_launch() { exec "$VIBE_TUNNEL_DIR/bin/vibe-tunnel-launch" "$@"; }
+
 # --- configs / profiles -----------------------------------------------------
 cmd_configs() {
     local porcelain=0; [ "${1:-}" = "--porcelain" ] && porcelain=1
-    local f name ws hd found=0
-    for f in "$CLAUDE_LAUNCH_CONFIG_DIR"/*.conf; do
-        [ -e "$f" ] || continue
-        found=1
-        name=${f##*/}; name=${name%.conf}
-        if ! config_is_valid "$f"; then
-            [ "$porcelain" -eq 1 ] || warn "$name: unexpected content, skipped"
-            continue
-        fi
-        ws=$(config_field "$f" WORKSPACE); hd=$(config_field "$f" CLAUDE_MOBILE_HOME)
-        if [ "$porcelain" -eq 1 ]; then printf '%s|%s|%s\n' "$name" "$ws" "$hd"
-        else printf '  %s%-20s%s %s  %s(home: %s)%s\n' "$BOLD" "$name" "$RST" "$ws" "$DIM" "$hd" "$RST"; fi
+    local d f name ws hd pr lb src found=0 seen=" "
+    for d in "$VT_CONFIG_DIR" "$CLAUDE_LAUNCH_CONFIG_DIR"; do
+        [ -d "$d" ] || continue
+        [ "$d" = "$VT_CONFIG_DIR" ] && src=vibe-tunnel || src=claude-launch
+        for f in "$d"/*.conf; do
+            [ -e "$f" ] || continue
+            name=${f##*/}; name=${name%.conf}
+            case "$seen" in *" $name "*) continue ;; esac
+            seen="$seen$name "
+            found=1
+            if ! config_is_valid "$f"; then
+                [ "$porcelain" -eq 1 ] || warn "$name: unexpected content, skipped"
+                continue
+            fi
+            ws=$(config_field "$f" WORKSPACE); hd=$(config_field "$f" CLAUDE_MOBILE_HOME)
+            pr=$(config_field "$f" PROFILE);   lb=$(config_field "$f" LABEL)
+            if [ "$porcelain" -eq 1 ]; then printf '%s|%s|%s|%s|%s|%s\n' "$name" "$ws" "$hd" "$pr" "$lb" "$src"
+            else
+                printf '  %s%-20s%s %s\n' "$BOLD" "$name" "$RST" "$ws"
+                printf '  %-20s %shome %s%s%s%s\n' "" "$DIM" "$hd" "${pr:+  profile $pr}" "${lb:+  label $lb}" "$RST"
+                [ "$src" = claude-launch ] && printf '  %-20s %s(from claude-launch)%s\n' "" "$DIM" "$RST"
+            fi
+        done
     done
     if [ "$found" -eq 0 ] && [ "$porcelain" -eq 0 ]; then
-        echo "No saved claude-launch configs in $CLAUDE_LAUNCH_CONFIG_DIR."
-        echo "Create one with 'claude-launch' -> 'Save current config', or pass --workspace/--rw/--ro directly."
+        echo "No saved configs in $VT_CONFIG_DIR (or $CLAUDE_LAUNCH_CONFIG_DIR)."
+        echo "Create one with 'vibe-tunnel launch' -> 'Save current config', or pass --workspace/--rw/--ro directly."
     fi
 }
 
@@ -330,8 +412,8 @@ cmd_doctor() {
     command -v sbatch >/dev/null 2>&1 && ok "slurm (sbatch) available" || warn "sbatch not found"
     if [ -n "${http_proxy:-}${HTTP_PROXY:-}" ]; then ok "proxy set: ${http_proxy:-$HTTP_PROXY}"
     else warn "no http_proxy in this shell (jobs run 'module load eth_proxy' themselves)"; fi
-    local n; n=$(ls "$CLAUDE_LAUNCH_CONFIG_DIR"/*.conf 2>/dev/null | wc -l | tr -d ' ')
-    ok "claude-launch configs: $n in $CLAUDE_LAUNCH_CONFIG_DIR"
+    local n m; n=$(ls "$VT_CONFIG_DIR"/*.conf 2>/dev/null | wc -l | tr -d ' '); m=$(ls "$CLAUDE_LAUNCH_CONFIG_DIR"/*.conf 2>/dev/null | wc -l | tr -d ' ')
+    ok "saved configs: $n in $VT_CONFIG_DIR, $m from claude-launch"
     echo
     cmd_profiles
 }
@@ -339,7 +421,9 @@ cmd_doctor() {
 # --- main -------------------------------------------------------------------
 cmd=${1:-}; [ $# -gt 0 ] && shift
 case "$cmd" in
+    launch)   cmd_launch "$@" ;;
     submit)   cmd_submit "$@" ;;
+    wait)     cmd_wait "$@" ;;
     status)   cmd_status "$@" ;;
     show)     cmd_show "$@" ;;
     logs)     cmd_logs "$@" ;;
