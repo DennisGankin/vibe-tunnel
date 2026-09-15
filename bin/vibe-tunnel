@@ -193,7 +193,7 @@ cmd_submit() {
         "$profile_path") || die "sbatch failed"
     job_id=${out%%;*}
     [ -n "$job_id" ] || die "could not read the job id from sbatch output: $out"
-    printf '%s %s %s\n' "$job_id" "$job_name" "$tunnel_name" > "$VT_STATE_DIR/last-job"
+    printf '%s %s %s %s\n' "$job_id" "$job_name" "$tunnel_name" "$(date +%s)-$$" > "$VT_STATE_DIR/last-job"
 
     if [ "$OPT_JSON" -eq 1 ]; then
         printf '{"job_id":"%s","job_name":"%s","tunnel_name":"%s","log":"%s","profile":"%s","config":"%s"}\n' \

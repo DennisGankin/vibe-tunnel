@@ -7,7 +7,7 @@ set -euo pipefail
 # (your ~/.ssh/config, keys, agent and aliases apply): run the remote launch
 # menu, wait for the tunnel, then open it in desktop VS Code here.
 #
-#   vibe-tunnel                       menu on the cluster -> submit -> wait -> open VS Code
+#   vibe-tunnel                       menu on the cluster: reopen a running tunnel, or submit -> wait -> open VS Code
 #   vibe-tunnel launch [--config N]   same
 #   vibe-tunnel submit ...            non-interactive submit (same flags as on the cluster), then wait + open
 #   vibe-tunnel open JOBID|LABEL      (re)open a running tunnel in VS Code
@@ -167,7 +167,10 @@ cmd_launch() {
         printf '  %snothing submitted.%s\n' "$DIM" "$RST"; exit 0
     fi
     id=${after%% *}
-    printf '  %swaiting for job %s (Ctrl-C stops waiting; the job keeps running)…%s\n' "$DIM" "$id" "$RST"
+    case "$after" in
+        *" reopen "*) ;;
+        *) printf '  %swaiting for job %s (Ctrl-C stops waiting; the job keeps running)…%s\n' "$DIM" "$id" "$RST" ;;
+    esac
     wait_and_open "$id"
 }
 

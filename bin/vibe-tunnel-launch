@@ -12,8 +12,10 @@ set -euo pipefail
 #
 #   vibe-tunnel launch [--config NAME] [--no-wait]
 #
-# --no-wait returns right after the submission (the laptop client waits itself
-# so it can open VS Code locally); the submitted job is in $VT_STATE_DIR/last-job.
+# Running tunnels are listed at the top; "Reopen a running tunnel" picks one
+# instead of submitting. --no-wait returns right after a submission or reopen
+# (the laptop client waits itself so it can open VS Code locally); the chosen
+# job is recorded in $VT_STATE_DIR/last-job either way.
 
 VT_LAUNCH_BIN=$(realpath "$0")
 VIBE_TUNNEL_DIR=${VIBE_TUNNEL_DIR:-$(dirname "$(dirname "$VT_LAUNCH_BIN")")}
@@ -69,18 +71,43 @@ term_rows() {
 }
 
 header_lines() {
-    local rw=${#RW_BINDS[@]} ro=${#RO_BINDS[@]} cap=${HEADER_BIND_CAP:-0}
+    local rw=${#RW_BINDS[@]} ro=${#RO_BINDS[@]} run=${#RUN_IDS[@]} cap=${HEADER_BIND_CAP:-0}
     if [ "$cap" -gt 0 ]; then
         [ "$rw" -gt "$cap" ] && rw=$((cap + 1))
         [ "$ro" -gt "$cap" ] && ro=$((cap + 1))
+        [ "$run" -gt "$cap" ] && run=$((cap + 1))
     fi
     [ "$rw" -gt 0 ] || rw=1
     [ "$ro" -gt 0 ] || ro=1
     if [ "${HEADER_COMPACT:-0}" -eq 1 ]; then
-        printf '%s' $((8 + rw + ro))
+        printf '%s' $((8 + rw + ro + (run > 0 ? run + 1 : 0)))
     else
-        printf '%s' $((18 + rw + ro))
+        printf '%s' $((18 + rw + ro + (run > 0 ? run + 2 : 0)))
     fi
+}
+
+# --- running tunnels -----------------------------------------------------------
+RUN_IDS=() RUN_LABELS=() RUN_TUNNELS=()
+load_running() {
+    RUN_IDS=() RUN_LABELS=() RUN_TUNNELS=()
+    local id name state node el left tunnel link
+    while IFS='|' read -r id name state node el left tunnel link; do
+        [ -n "$id" ] || continue
+        RUN_IDS+=("$id"); RUN_TUNNELS+=("$tunnel")
+        RUN_LABELS+=("$(printf '%-12s %-9s %-10s left %-9s job %s' "${tunnel:-(starting)}" "$state" "${node:--}" "$left" "$id")")
+    done < <("$VT" status --porcelain 2>/dev/null || true)
+}
+print_running() {
+    local cap=${HEADER_BIND_CAP:-0} total=${#RUN_IDS[@]} shown i
+    [ "$total" -gt 0 ] || return 0
+    printf '  %sRunning tunnels%s  %s(pick "Reopen" to connect to one)%s%s\n' "$BOLD" "$RST" "$DIM" "$RST" "$EL"
+    shown=$total
+    [ "$cap" -gt 0 ] && [ "$shown" -gt "$cap" ] && shown=$cap
+    for (( i = 0; i < shown; i++ )); do
+        printf '    %s▶%s %s%s\n' "$GREEN" "$RST" "${RUN_LABELS[$i]}" "$EL"
+    done
+    [ "$shown" -lt "$total" ] && printf '    %s… %d more%s%s\n' "$GREY" $((total - shown)) "$RST" "$EL"
+    return 0
 }
 
 # --- helpers ---------------------------------------------------------------
@@ -263,6 +290,7 @@ mode_hint() {
 
 render_header_compact() {
     printf '  %s● vibe-tunnel%s  %s·%s  %s%s%s %s%s%s%s\n' "$BOLD$GREEN" "$RST" "$DIM" "$RST" "$GREEN" "$MODE" "$RST" "$DIM" "$(mode_hint)" "$RST" "$EL"
+    print_running
     printf '  %sWorkspace%s %s%s%s%s\n' "$BOLD" "$RST" "$YELLOW" "$(tilde "$WORKSPACE")" "$RST" "$EL"
     printf '  %sHome%s      %s%s%s%s\n' "$BOLD" "$RST" "$CYAN" "$(tilde "$CLAUDE_MOBILE_HOME")" "$RST" "$EL"
     printf '  %sProfile%s   %s%s\n' "$BOLD" "$RST" "$(profile_line)" "$EL"
@@ -282,6 +310,7 @@ render_header() {
         "$CYAN" "$RST" "$BOLD$GREEN" "$RST" "$DIM" "$RST" "$CYAN" "$RST" "$EL"
     printf '  %s╰────────────────────────────────────────────────────────────╯%s%s\n' "$CYAN" "$RST" "$EL"
     printf '%s\n' "$EL"
+    if [ ${#RUN_IDS[@]} -gt 0 ]; then print_running; printf '%s\n' "$EL"; fi
     printf '  %sMode%s       %s%s%s  %s%s%s%s\n' "$BOLD" "$RST" "$GREEN" "$MODE" "$RST" "$DIM" "$(mode_hint)" "$RST" "$EL"
     printf '%s\n' "$EL"
     printf '  %sWorkspace%s  %s%s%s%s\n' "$BOLD" "$RST" "$YELLOW" "$(tilde "$WORKSPACE")" "$RST" "$EL"
@@ -501,6 +530,23 @@ reuse_config() {
     pause
 }
 
+# --- reopen a running tunnel -------------------------------------------------------
+reopen_running() {
+    load_running
+    [ ${#RUN_IDS[@]} -gt 0 ] || { render_header; echo "  (no running tunnels)"; clr_down; pause; return; }
+    local labels=("${RUN_LABELS[@]}" "(cancel)")
+    menu_select "Pick the tunnel to connect to:" "${labels[@]}"
+    [ "${MENU_CHOICE}" -ge 0 ] 2>/dev/null || return
+    [ "${MENU_CHOICE}" -lt "${#RUN_IDS[@]}" ] || return
+    local id=${RUN_IDS[$MENU_CHOICE]} tunnel=${RUN_TUNNELS[$MENU_CHOICE]}
+    mkdir -p "$VT_STATE_DIR"
+    printf '%s reopen %s %s\n' "$id" "$tunnel" "$(date +%s)-$$" > "$VT_STATE_DIR/last-job"
+    cls; show_cursor; trap - EXIT
+    [ "$NO_WAIT" -eq 1 ] && exit 0
+    # `wait` returns at once for a tunnel that is already up and prints how to connect.
+    exec "$VT" wait "$id"
+}
+
 # --- launch --------------------------------------------------------------------
 launch() {
     if [ "$MODE" != tunnel ]; then
@@ -550,34 +596,41 @@ fi
 
 cls
 while true; do
-    menu_select "Main menu:" \
-        "Change workspace directory" \
-        "Change home directory (persistent logins & state)" \
-        "Add read-write directory" \
-        "Add read-only directory" \
-        "Remove an extra bind" \
-        "Change resource profile (CPUs, GPUs, time)" \
-        "Set tunnel label" \
-        "Change mode (tunnel / claude / shell)" \
-        "Reuse a saved config" \
-        "Save current config" \
-        "Review submit command" \
-        "Launch ▶" \
-        "Quit"
-    case "${MENU_CHOICE}" in
-        0) if ws=$(prompt_dir "Workspace directory"); then WORKSPACE=$ws; fi ;;
-        1) if hd=$(prompt_dir "Home directory" allow-missing); then CLAUDE_MOBILE_HOME=$hd; fi ;;
-        2) if src=$(prompt_dir "Read-write directory"); then RW_BINDS+=("$(prompt_dest "$src")"); fi ;;
-        3) if src=$(prompt_dir "Read-only directory"); then RO_BINDS+=("$(prompt_dest "$src")"); fi ;;
-        4) remove_bind ;;
-        5) change_profile ;;
-        6) set_label ;;
-        7) change_mode ;;
-        8) reuse_config ;;
-        9) save_config ;;
-        10) review_command ;;
-        11) launch ;;
-        12|-2) cls; printf '%s  Bye.%s\n' "$DIM" "$RST"; exit 0 ;;
+    load_running
+    items=() actions=()
+    if [ ${#RUN_IDS[@]} -gt 0 ]; then items+=("Reopen a running tunnel ▶"); actions+=(reopen); fi
+    items+=("Change workspace directory");                              actions+=(workspace)
+    items+=("Change home directory (persistent logins & state)");      actions+=(home)
+    items+=("Add read-write directory");                               actions+=(rw)
+    items+=("Add read-only directory");                                actions+=(ro)
+    items+=("Remove an extra bind");                                   actions+=(remove)
+    items+=("Change resource profile (CPUs, GPUs, time)");             actions+=(profile)
+    items+=("Set tunnel label");                                       actions+=(label)
+    items+=("Change mode (tunnel / claude / shell)");                  actions+=(mode)
+    items+=("Reuse a saved config");                                   actions+=(reuse)
+    items+=("Save current config");                                    actions+=(save)
+    items+=("Review submit command");                                  actions+=(review)
+    items+=("Launch ▶");                                               actions+=(launch)
+    items+=("Quit");                                                   actions+=(quit)
+    menu_select "Main menu:" "${items[@]}"
+    if [ "${MENU_CHOICE}" -eq -2 ]; then action=quit
+    elif [ "${MENU_CHOICE}" -ge 0 ] 2>/dev/null && [ "${MENU_CHOICE}" -lt ${#actions[@]} ]; then action=${actions[$MENU_CHOICE]}
+    else action=none; fi
+    case "$action" in
+        reopen)    reopen_running ;;
+        workspace) if ws=$(prompt_dir "Workspace directory"); then WORKSPACE=$ws; fi ;;
+        home)      if hd=$(prompt_dir "Home directory" allow-missing); then CLAUDE_MOBILE_HOME=$hd; fi ;;
+        rw)        if src=$(prompt_dir "Read-write directory"); then RW_BINDS+=("$(prompt_dest "$src")"); fi ;;
+        ro)        if src=$(prompt_dir "Read-only directory"); then RO_BINDS+=("$(prompt_dest "$src")"); fi ;;
+        remove)    remove_bind ;;
+        profile)   change_profile ;;
+        label)     set_label ;;
+        mode)      change_mode ;;
+        reuse)     reuse_config ;;
+        save)      save_config ;;
+        review)    review_command ;;
+        launch)    launch ;;
+        quit)      cls; printf '%s  Bye.%s\n' "$DIM" "$RST"; exit 0 ;;
         *) : ;;
     esac
 done
