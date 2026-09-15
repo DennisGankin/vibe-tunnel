@@ -213,53 +213,65 @@ menu_select() {
     fi
 
     hide_cursor
-    local key rest i rows avail h vis start cap
+    local key rest i rows avail h vis start cap full=1 buf obuf
     while true; do
-        rows=$(term_rows)
-        avail=$((rows - 1))
-        HEADER_COMPACT=0
-        HEADER_BIND_CAP=0
-        h=$(header_lines)
-        if [ $((h + 3 + n)) -gt "$avail" ]; then
-            HEADER_COMPACT=1
+        if [ "$full" -eq 1 ]; then
+            # Fit the frame to the window: full header, else compact header, else
+            # trimmed bind lists, else a scrolling option list.
+            rows=$(term_rows)
+            avail=$((rows - 1))
+            HEADER_COMPACT=0
+            HEADER_BIND_CAP=0
             h=$(header_lines)
-        fi
-        if [ $((h + 6)) -gt "$avail" ]; then
-            for cap in 8 6 4 3 2 1; do
-                HEADER_BIND_CAP=$cap
+            if [ $((h + 3 + n)) -gt "$avail" ]; then
+                HEADER_COMPACT=1
                 h=$(header_lines)
-                [ $((h + 6)) -le "$avail" ] && break
-            done
+            fi
+            if [ $((h + 6)) -gt "$avail" ]; then
+                for cap in 8 6 4 3 2 1; do
+                    HEADER_BIND_CAP=$cap
+                    h=$(header_lines)
+                    [ $((h + 6)) -le "$avail" ] && break
+                done
+            fi
+            vis=$((avail - h - 3))
+            [ "$vis" -lt "$n" ] && vis=$((vis - 2))   # room for the ↑/↓ markers
+            [ "$vis" -lt 3 ] && vis=3
+            [ "$vis" -gt "$n" ] && vis=$n
+            # A frame of a different shape than the previous one would leave stale
+            # rows behind an in-place redraw, so clear fully whenever the shape changes.
+            if [ $((h + 3 + vis + 2)) -gt "$avail" ]; then NEED_CLS=1; fi
+            if [ "$h:$HEADER_COMPACT:$vis" != "${LAST_SHAPE:-}" ]; then NEED_CLS=1; LAST_SHAPE="$h:$HEADER_COMPACT:$vis"; fi
+            if [ "${NEED_CLS:-0}" -eq 1 ]; then cls; NEED_CLS=0; fi
+            # Header, prompt and key hint are drawn once per menu and sent as one
+            # write; arrow keys then only repaint the option rows below them.
+            buf=$(render_header; printf '  %s%s%s%s\n' "$DIM" "$prompt" "$RST" "$EL"
+                  printf '  %s↑/↓ move · enter select · q back%s%s\n%s\n' "$GREY" "$RST" "$EL" "$EL"; printf x)
+            printf '%s' "${buf%x}"
+            full=0
         fi
-        vis=$((avail - h - 3))
-        [ "$vis" -lt "$n" ] && vis=$((vis - 2))
-        [ "$vis" -lt 3 ] && vis=3
-        [ "$vis" -gt "$n" ] && vis=$n
         start=0
         if [ "$vis" -lt "$n" ]; then
             start=$((sel - vis / 2))
             [ "$start" -lt 0 ] && start=0
             [ "$start" -gt $((n - vis)) ] && start=$((n - vis))
         fi
-        if [ $((h + 3 + vis + 2)) -gt "$avail" ]; then NEED_CLS=1; fi
-        # A frame of a different shape (header height, option count) leaves
-        # stale rows behind an in-place redraw, so clear fully on shape changes.
-        if [ "$h:$HEADER_COMPACT:$vis" != "${LAST_SHAPE:-}" ]; then NEED_CLS=1; LAST_SHAPE="$h:$HEADER_COMPACT:$vis"; fi
-        if [ "${NEED_CLS:-0}" -eq 1 ]; then cls; NEED_CLS=0; fi
-        render_header
-        printf '  %s%s%s%s\n' "$DIM" "$prompt" "$RST" "$EL"
-        printf '  %s↑/↓ move · enter select · q back%s%s\n%s\n' "$GREY" "$RST" "$EL" "$EL"
-        [ "$start" -gt 0 ] && printf '   %s↑ %d more%s%s\n' "$GREY" "$start" "$RST" "$EL"
-        for (( i = start; i < start + vis; i++ )); do
-            if [ "$i" -eq "$sel" ]; then
-                printf '   %s●%s %s%s%s%s\n' "$GREEN" "$RST" "$BOLD" "${options[$i]}" "$RST" "$EL"
-            else
-                printf '   %s·%s %s%s%s%s\n' "$GREY" "$RST" "$DIM" "${options[$i]}" "$RST" "$EL"
-            fi
-        done
-        [ $((start + vis)) -lt "$n" ] && printf '   %s↓ %d more%s%s\n' "$GREY" $((n - start - vis)) "$RST" "$EL"
-        clr_down
+        obuf=$(
+            printf '\033[%d;1H' $((h + 4))     # first option row (1-based), just below the spacer
+            [ "$start" -gt 0 ] && printf '   %s↑ %d more%s%s\n' "$GREY" "$start" "$RST" "$EL"
+            for (( i = start; i < start + vis; i++ )); do
+                if [ "$i" -eq "$sel" ]; then
+                    printf '   %s●%s %s%s%s%s\n' "$GREEN" "$RST" "$BOLD" "${options[$i]}" "$RST" "$EL"
+                else
+                    printf '   %s·%s %s%s%s%s\n' "$GREY" "$RST" "$DIM" "${options[$i]}" "$RST" "$EL"
+                fi
+            done
+            [ $((start + vis)) -lt "$n" ] && printf '   %s↓ %d more%s%s\n' "$GREY" $((n - start - vis)) "$RST" "$EL"
+            clr_down; printf x)
+        printf '%s' "${obuf%x}"
         IFS= read -rsn1 key || true
+        # A resize (WINCH trap) invalidates the layout: redo the full frame.
+        [ "${NEED_CLS:-0}" -eq 1 ] && full=1
         case "$key" in
             $'\x1b')
                 read -rsn2 -t 0.01 rest || true
