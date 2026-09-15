@@ -160,6 +160,22 @@ The menu offers these as *mode* too (tunnel / claude / shell).
 
 Logs: `vibe-tunnel logs <jobid>` (cluster or laptop), `vibe-tunnel status`, `vibe-tunnel doctor`.
 
+## VS Code extension (optional GUI)
+
+The same thing as a sidebar inside VS Code: running tunnels (click to connect, stop, log), saved configs
+(click to launch, edit, delete, run Claude or a shell in that sandbox), and *New tunnel…* as a step-by-step
+setup with a remote directory browser. Install the `.vsix` from [vscode-extension/](vscode-extension/):
+
+```bash
+code --install-extension vscode-extension/vibe-tunnel-0.1.0.vsix
+```
+Set *vibe-tunnel › Host* and *Remote Dir* in the settings (defaults: `euler` and the Beltrao lab's shared
+installation). The extension needs ssh to work without prompts: an ssh key in your agent, or *Log in via
+terminal* once from the sidebar (macOS/Linux; the connection is then reused for 15 minutes). It runs on Windows
+without WSL, since Windows ships OpenSSH. Details in [vscode-extension/README.md](vscode-extension/README.md).
+
+The sidebar and the terminal menu use the same `vibe-tunnel` commands on the cluster and see the same configs.
+
 ## Windows
 
 The laptop side is bash + ssh + the `code` command, so it runs in either of Windows' Unix-like shells. Nothing is
@@ -182,7 +198,7 @@ report what you see.
 
 ```
 bin/vibe-tunnel           one entry point: cluster CLI (launch / submit / claude / shell / wait / status / show /
-                          logs / stop / configs / profiles / doctor), or laptop client when there is no slurm
+                          logs / stop / configs / config / profiles / ls / doctor), or laptop client when there is no slurm
 bin/vibe-tunnel-launch    the interactive menu behind `vibe-tunnel launch` (adapted from claude-launch)
 bin/vibe-tunnel-client    laptop side: runs the remote menu over ssh, waits, opens VS Code (plain bash + ssh)
 bin/vibe-tunnel-lib       shared: site settings, config validation, sandbox resolution, container arguments
@@ -195,6 +211,7 @@ setup.sh                  cluster: build image, download VS Code CLI, write ~/.v
 docs/CLUSTER_SETUP.md     cluster steps, design notes, things to verify on first use
 cli/code                  VS Code CLI binary (downloaded by setup.sh, gitignored)
 site.env.example          lab-wide defaults for a shared installation (copy to site.env, gitignored)
+vscode-extension/         the VS Code sidebar extension (TypeScript; built .vsix committed for one-click install)
 ```
 
 Cluster-side state lives in `~/.vibe-tunnel/`: `env` (site settings), `logs/<jobid>.log` (the job log `wait` polls), `jobs/*.env` (per-run settings), `profiles/` (your own sbatch profiles), `last-job` (most recent submission). `configs/` (saved configs) and `home/` (default sandbox home) live there too. Laptop settings: `~/.config/vibe-tunnel/client`.

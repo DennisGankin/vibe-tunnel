@@ -543,23 +543,7 @@ load_config_file() {
     return 0
 }
 
-save_config_file() {
-    local name=$1 f b
-    f=$(config_path "$name")
-    mkdir -p "$VT_CONFIG_DIR"
-    {
-        printf '# vibe-tunnel config: %s\n' "$name"
-        printf '# saved %s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-        printf 'WORKSPACE=%q\n' "$WORKSPACE"
-        printf 'MODE=%q\n' "$MODE"
-        printf 'CLAUDE_MOBILE_HOME=%q\n' "$CLAUDE_MOBILE_HOME"
-        printf 'PROFILE=%q\n' "$PROFILE"
-        printf 'LABEL=%q\n' "$LABEL"
-        printf 'TIME=%q\nCPUS=%q\nMEM=%q\nGPUS=%q\nPARTITION=%q\nACCOUNT=%q\n' "$R_TIME" "$R_CPUS" "$R_MEM" "$R_GPUS" "$R_PARTITION" "$R_ACCOUNT"
-        printf 'RW_BINDS=('; for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do printf ' %q' "$b"; done; printf ' )\n'
-        printf 'RO_BINDS=('; for b in "${RO_BINDS[@]+"${RO_BINDS[@]}"}"; do printf ' %q' "$b"; done; printf ' )\n'
-    } > "$f"
-}
+save_config_file() { write_config_file "$(config_path "$1")" "$1"; }
 
 prompt_config_name() {
     local reply
