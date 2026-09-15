@@ -20,15 +20,16 @@ set -euo pipefail
 VT_LAUNCH_BIN=$(realpath "$0")
 VIBE_TUNNEL_DIR=${VIBE_TUNNEL_DIR:-$(dirname "$(dirname "$VT_LAUNCH_BIN")")}
 VT=$VIBE_TUNNEL_DIR/bin/vibe-tunnel
-VT_STATE_DIR=${VT_STATE_DIR:-$HOME/.vibe-tunnel}
-VT_CONFIG_DIR=${VT_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibe-tunnel/configs}
-CLAUDE_LAUNCH_CONFIG_DIR=${CLAUDE_LAUNCH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-launch/configs}
+# shellcheck disable=SC1091
+. "$VIBE_TUNNEL_DIR/bin/vibe-tunnel-lib"
 
 MODE=tunnel
 WORKSPACE=$(pwd)
 CLAUDE_MOBILE_HOME=${VT_DEFAULT_HOME:-}
 PROFILE=
 LABEL=
+# Resource overrides on top of the profile (empty = the profile's value).
+R_TIME= R_CPUS= R_MEM= R_GPUS= R_PARTITION= R_ACCOUNT=
 RW_BINDS=()
 RO_BINDS=()
 NO_WAIT=0
@@ -153,21 +154,34 @@ prompt_dest() {
 pause() { show_cursor; read -r -p "$(printf '%s  (press Enter to continue)%s ' "$DIM" "$RST")" _ || true; }
 
 # --- profiles ----------------------------------------------------------------
-PROFILE_NAMES=() PROFILE_SUMMARIES=()
+PROFILE_NAMES=() PROFILE_PATHS=() PROFILE_SUMMARIES=()
 load_profiles() {
-    PROFILE_NAMES=() PROFILE_SUMMARIES=()
+    PROFILE_NAMES=() PROFILE_PATHS=() PROFILE_SUMMARIES=()
     local n f s
     while IFS='|' read -r n f s; do
         [ -n "$n" ] || continue
-        PROFILE_NAMES+=("$n"); PROFILE_SUMMARIES+=("$s")
+        PROFILE_NAMES+=("$n"); PROFILE_PATHS+=("$f"); PROFILE_SUMMARIES+=("$s")
     done < <("$VT" profiles --porcelain 2>/dev/null || true)
 }
-profile_summary() {
+profile_path() {
     local i
     for i in "${!PROFILE_NAMES[@]}"; do
-        [ "${PROFILE_NAMES[$i]}" = "$1" ] && { printf '%s' "${PROFILE_SUMMARIES[$i]}"; return; }
+        [ "${PROFILE_NAMES[$i]}" = "$1" ] && { printf '%s' "${PROFILE_PATHS[$i]}"; return; }
     done
-    printf '%s' "(unknown profile)"
+    return 1
+}
+# Effective resources: profile defaults with R_* overrides applied (marked *).
+profile_summary() {
+    local f; f=$(profile_path "$1") || { printf '%s' "(unknown profile)"; return; }
+    resources_summary "$f"
+}
+# Effective value of one resource key for the current profile.
+effective_resource() {
+    local k=$1 v f line
+    eval "v=\${R_$k:-}"
+    [ -z "$v" ] || { printf '%s' "$v"; return; }
+    f=$(profile_path "$PROFILE") || return 0
+    while IFS= read -r line; do case "$line" in "$k="*) printf '%s' "${line#*=}"; return ;; esac; done < <(profile_defaults "$f")
 }
 
 # --- arrow-key menu --------------------------------------------------------
@@ -293,7 +307,7 @@ render_header_compact() {
     print_running
     printf '  %sWorkspace%s %s%s%s%s\n' "$BOLD" "$RST" "$YELLOW" "$(tilde "$WORKSPACE")" "$RST" "$EL"
     printf '  %sHome%s      %s%s%s%s\n' "$BOLD" "$RST" "$CYAN" "$(tilde "$CLAUDE_MOBILE_HOME")" "$RST" "$EL"
-    printf '  %sProfile%s   %s%s\n' "$BOLD" "$RST" "$(profile_line)" "$EL"
+    printf '  %sResources%s %s%s\n' "$BOLD" "$RST" "$(profile_line)" "$EL"
     printf '  %sLabel%s     %s%s\n' "$BOLD" "$RST" "$(label_line)" "$EL"
     printf '  %sRead-write dirs%s%s\n' "$BOLD" "$RST" "$EL"
     print_binds "$GREEN" "${RW_BINDS[@]+"${RW_BINDS[@]}"}"
@@ -319,7 +333,7 @@ render_header() {
     printf '  %sHome%s       %s%s%s%s\n' "$BOLD" "$RST" "$CYAN" "$(tilde "$CLAUDE_MOBILE_HOME")" "$RST" "$EL"
     printf '             %s↳ persistent /home: Claude + VS Code logins, extensions, shell config%s%s\n' "$DIM" "$RST" "$EL"
     printf '%s\n' "$EL"
-    printf '  %sProfile%s    %s%s\n' "$BOLD" "$RST" "$(profile_line)" "$EL"
+    printf '  %sResources%s  %s%s\n' "$BOLD" "$RST" "$(profile_line)" "$EL"
     printf '  %sLabel%s      %s%s\n' "$BOLD" "$RST" "$(label_line)" "$EL"
     printf '%s\n' "$EL"
     printf '  %sRead-write dirs%s  %s(Claude can read & write files here)%s%s\n' "$BOLD" "$RST" "$DIM" "$RST" "$EL"
@@ -338,6 +352,14 @@ build_submit_args() {
     for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do printf '%s\n%s\n' "--rw" "$b"; done
     for b in "${RO_BINDS[@]+"${RO_BINDS[@]}"}"; do printf '%s\n%s\n' "--ro" "$b"; done
     [ "$MODE" != tunnel ] || [ -z "$LABEL" ] || printf '%s\n%s\n' "--name" "$LABEL"
+    if [ "$MODE" = tunnel ]; then
+        [ -z "$R_TIME" ]      || printf '%s\n%s\n' "--time" "$R_TIME"
+        [ -z "$R_CPUS" ]      || printf '%s\n%s\n' "--cpus" "$R_CPUS"
+        [ -z "$R_MEM" ]       || printf '%s\n%s\n' "--mem" "$R_MEM"
+        [ -z "$R_GPUS" ]      || printf '%s\n%s\n' "--gpus" "$R_GPUS"
+        [ -z "$R_PARTITION" ] || printf '%s\n%s\n' "--partition" "$R_PARTITION"
+        [ -z "$R_ACCOUNT" ]   || printf '%s\n%s\n' "--account" "$R_ACCOUNT"
+    fi
 }
 
 review_command() {
@@ -365,6 +387,50 @@ remove_bind() {
         w:*) local idx=${entry#w:}; unset 'RW_BINDS[idx]'; RW_BINDS=("${RW_BINDS[@]+"${RW_BINDS[@]}"}") ;;
         r:*) local idx=${entry#r:}; unset 'RO_BINDS[idx]'; RO_BINDS=("${RO_BINDS[@]+"${RO_BINDS[@]}"}") ;;
     esac
+}
+
+prompt_resource() {  # prompt_resource KEY "label" "hint"
+    local k=$1 label=$2 hint=$3 cur reply
+    cur=$(effective_resource "$k")
+    show_cursor
+    read -e -r -p "$(printf '%s%s%s [%s]  %s(Enter keeps, - resets to the profile): ' "$BOLD" "$label" "$RST" "${cur:-unset}" "$DIM$hint$RST")" reply || return
+    case "$reply" in
+        '') ;;
+        -)  eval "R_$k=" ;;
+        *)  eval "R_$k=\$reply" ;;
+    esac
+}
+
+change_resources() {
+    local items f
+    while true; do
+        load_profiles
+        items=(
+            "Base profile:  ${PROFILE:-(none)}"
+            "Time:          $(effective_resource TIME)${R_TIME:+ *}"
+            "CPUs:          $(effective_resource CPUS)${R_CPUS:+ *}"
+            "Memory per CPU: $(effective_resource MEM)${R_MEM:+ *}"
+            "GPUs:          $(effective_resource GPUS)${R_GPUS:+ *}"
+            "Partition:     $(effective_resource PARTITION)${R_PARTITION:+ *}"
+            "Account:       $(effective_resource ACCOUNT)${R_ACCOUNT:+ *}"
+            "Reset all overrides to the profile's values"
+            "Edit the profile file (${PROFILE:-none}) in \$EDITOR"
+            "Back"
+        )
+        menu_select "Resources (* = overridden; saved with the config, passed to sbatch as flags):" "${items[@]}"
+        case "${MENU_CHOICE}" in
+            0) change_profile ;;
+            1) prompt_resource TIME "Time limit" "d-hh:mm:ss, e.g. 04:00:00 or 2-00:00:00" ;;
+            2) prompt_resource CPUS "CPUs" "e.g. 16" ;;
+            3) prompt_resource MEM "Memory per CPU" "e.g. 2G or 4000M" ;;
+            4) prompt_resource GPUS "GPUs" "e.g. a100:1, rtx_4090:4" ;;
+            5) prompt_resource PARTITION "Partition" "sinfo lists them" ;;
+            6) prompt_resource ACCOUNT "Account" "e.g. es_biol" ;;
+            7) R_TIME= R_CPUS= R_MEM= R_GPUS= R_PARTITION= R_ACCOUNT= ;;
+            8) if [ -n "$PROFILE" ]; then cls; show_cursor; "$VT" profiles edit "$PROFILE" || pause; NEED_CLS=1; fi ;;
+            *) return ;;
+        esac
+    done
 }
 
 change_profile() {
@@ -411,26 +477,6 @@ set_label() {
 # --- saved configurations --------------------------------------------------
 config_path() { printf '%s/%s.conf' "$VT_CONFIG_DIR" "$1"; }
 
-find_config() {
-    local n=$1 d
-    for d in "$VT_CONFIG_DIR" "$CLAUDE_LAUNCH_CONFIG_DIR"; do
-        [ -f "$d/$n.conf" ] && { printf '%s' "$d/$n.conf"; return; }
-    done
-    return 1
-}
-
-config_is_valid() {
-    local line
-    while IFS= read -r line || [ -n "$line" ]; do
-        case "$line" in
-            ''|'#'*) ;;
-            WORKSPACE=*|MODE=*|CLAUDE_MOBILE_HOME=*|'RW_BINDS=('*|'RO_BINDS=('*|PROFILE=*|LABEL=*) ;;
-            *) return 1 ;;
-        esac
-    done < "$1"
-    return 0
-}
-
 # CONFIG_NAMES / CONFIG_LABELS from `vibe-tunnel configs --porcelain` (own + claude-launch).
 CONFIG_NAMES=() CONFIG_LABELS=()
 list_configs() {
@@ -448,8 +494,10 @@ load_config_file() {
     config_is_valid "$f" || return 1
     local saved_home=$CLAUDE_MOBILE_HOME
     RW_BINDS=(); RO_BINDS=(); PROFILE=; LABEL=
+    TIME= CPUS= MEM= GPUS= PARTITION= ACCOUNT=
     # shellcheck disable=SC1090
     . "$f"
+    R_TIME=$TIME R_CPUS=$CPUS R_MEM=$MEM R_GPUS=$GPUS R_PARTITION=$PARTITION R_ACCOUNT=$ACCOUNT
     case "$MODE" in tunnel|claude|shell) ;; *) MODE=tunnel ;; esac
     [ -n "$CLAUDE_MOBILE_HOME" ] || CLAUDE_MOBILE_HOME=$saved_home
     return 0
@@ -467,6 +515,7 @@ save_config_file() {
         printf 'CLAUDE_MOBILE_HOME=%q\n' "$CLAUDE_MOBILE_HOME"
         printf 'PROFILE=%q\n' "$PROFILE"
         printf 'LABEL=%q\n' "$LABEL"
+        printf 'TIME=%q\nCPUS=%q\nMEM=%q\nGPUS=%q\nPARTITION=%q\nACCOUNT=%q\n' "$R_TIME" "$R_CPUS" "$R_MEM" "$R_GPUS" "$R_PARTITION" "$R_ACCOUNT"
         printf 'RW_BINDS=('; for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do printf ' %q' "$b"; done; printf ' )\n'
         printf 'RO_BINDS=('; for b in "${RO_BINDS[@]+"${RO_BINDS[@]}"}"; do printf ' %q' "$b"; done; printf ' )\n'
     } > "$f"
@@ -604,7 +653,7 @@ while true; do
     items+=("Add read-write directory");                               actions+=(rw)
     items+=("Add read-only directory");                                actions+=(ro)
     items+=("Remove an extra bind");                                   actions+=(remove)
-    items+=("Change resource profile (CPUs, GPUs, time)");             actions+=(profile)
+    items+=("Resources (profile, time, CPUs, memory, GPUs)");         actions+=(resources)
     items+=("Set tunnel label");                                       actions+=(label)
     items+=("Change mode (tunnel / claude / shell)");                  actions+=(mode)
     items+=("Reuse a saved config");                                   actions+=(reuse)
@@ -623,7 +672,7 @@ while true; do
         rw)        if src=$(prompt_dir "Read-write directory"); then RW_BINDS+=("$(prompt_dest "$src")"); fi ;;
         ro)        if src=$(prompt_dir "Read-only directory"); then RO_BINDS+=("$(prompt_dest "$src")"); fi ;;
         remove)    remove_bind ;;
-        profile)   change_profile ;;
+        resources) change_resources ;;
         label)     set_label ;;
         mode)      change_mode ;;
         reuse)     reuse_config ;;

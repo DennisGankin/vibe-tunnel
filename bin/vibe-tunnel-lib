@@ -48,9 +48,54 @@ config_is_valid() {
         case "$line" in
             ''|'#'*) ;;
             WORKSPACE=*|MODE=*|CLAUDE_MOBILE_HOME=*|'RW_BINDS=('*|'RO_BINDS=('*|PROFILE=*|LABEL=*) ;;
+            TIME=*|CPUS=*|MEM=*|GPUS=*|PARTITION=*|ACCOUNT=*) ;;
             *) return 1 ;;
         esac
     done < "$1"
+}
+
+# Resource fields a config may override on top of its profile (empty = profile's value).
+RESOURCE_KEYS=(TIME CPUS MEM GPUS PARTITION ACCOUNT)
+# sbatch flag for each key
+resource_flag() {
+    case "$1" in
+        TIME) printf -- '--time' ;; CPUS) printf -- '--cpus-per-task' ;; MEM) printf -- '--mem-per-cpu' ;;
+        GPUS) printf -- '--gpus' ;; PARTITION) printf -- '--partition' ;; ACCOUNT) printf -- '--account' ;;
+    esac
+}
+# Defaults from a profile's #SBATCH lines, as KEY=value lines (missing keys omitted).
+profile_defaults() {
+    awk '
+        /^#SBATCH/ {
+            for (i = 2; i <= NF; i++) {
+                split($i, kv, "=")
+                if (kv[1] == "--time") print "TIME=" kv[2]
+                else if (kv[1] == "--cpus-per-task") print "CPUS=" kv[2]
+                else if (kv[1] == "--mem-per-cpu") print "MEM=" kv[2]
+                else if (kv[1] == "--gpus") print "GPUS=" kv[2]
+                else if (kv[1] == "--partition") print "PARTITION=" kv[2]
+                else if (kv[1] == "--account") print "ACCOUNT=" kv[2]
+            }
+        }' "$1"
+}
+# One-line human summary of effective resources: profile defaults overridden by
+# the R_* variables (R_TIME, R_CPUS, ...). Overridden values are marked with *.
+resources_summary() {
+    local f=$1 k v line d
+    declare -a def=()
+    while IFS= read -r line; do def+=("$line"); done < <(profile_defaults "$f")
+    local out=
+    for k in "${RESOURCE_KEYS[@]}"; do
+        d=; for line in "${def[@]+"${def[@]}"}"; do case "$line" in "$k="*) d=${line#*=} ;; esac; done
+        eval "v=\${R_$k:-}"
+        if [ -n "$v" ]; then out+="${out:+ · }$(resource_label "$k") $v*"
+        elif [ -n "$d" ]; then out+="${out:+ · }$(resource_label "$k") $d"
+        fi
+    done
+    printf '%s' "$out"
+}
+resource_label() {
+    case "$1" in TIME) printf time ;; CPUS) printf cpus ;; MEM) printf mem/cpu ;; GPUS) printf gpus ;; PARTITION) printf partition ;; ACCOUNT) printf account ;; esac
 }
 
 # Per-run settings file written by the CLI for the job/run script.

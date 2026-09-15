@@ -211,6 +211,7 @@ case "$cmd" in
     wait)                  [ -n "${1:-}" ] || die "wait needs a JOBID"; wait_and_open "$1" ;;
     logs)                  rvtt logs "$@" ;;
     status|list)           rvt status "$@" ;;
-    stop|configs|profiles|doctor|show) rvt "$cmd" "$@" ;;
+    profiles)              case "${1:-}" in edit|new) rvtt profiles "$@" ;; *) rvt profiles "$@" ;; esac ;;
+    stop|configs|doctor|show) rvt "$cmd" "$@" ;;
     *) die "unknown command '$cmd' (try: vibe-tunnel help)" ;;
 esac
