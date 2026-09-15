@@ -24,20 +24,27 @@ fi
 VT_SHELLRC=${VT_SHELLRC:-$VIBE_TUNNEL_DIR/bin/vibe-tunnel-shellrc}
 VT_ENTRY=$VIBE_TUNNEL_DIR/bin/vibe-tunnel-entry
 
-# Default sandbox home. Keeps euler-vibe's when that is the image in use, so
-# existing logins carry over; otherwise home/default inside this repo.
+# Default sandbox home: per user, under the state dir (a shared repo clone must
+# not share one home). Keeps euler-vibe's when that is the image in use, so
+# existing logins carry over. Override with VT_DEFAULT_HOME in $VT_ENV.
 if [ -n "${VT_DEFAULT_HOME:-}" ]; then :
 elif [ -n "$EULER_VIBE_DIR" ] && [ "$VT_IMAGE" = "${CLAUDE_MOBILE_IMAGE:-}" ]; then VT_DEFAULT_HOME=$EULER_VIBE_DIR/home/claude-mobile
-else VT_DEFAULT_HOME=$VIBE_TUNNEL_DIR/home/default; fi
+else VT_DEFAULT_HOME=$VT_STATE_DIR/home; fi
 
-VT_CONFIG_DIR=${VT_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/vibe-tunnel/configs}
-# Legacy: configs saved by euler-vibe's claude-launch are read (never written) too.
+# Saved configs live with the rest of the state. Older locations are still read:
+# ~/.config/vibe-tunnel/configs (earlier vibe-tunnel) and claude-launch's dir.
+VT_CONFIG_DIR=${VT_CONFIG_DIR:-$VT_STATE_DIR/configs}
+VT_OLD_CONFIG_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/vibe-tunnel/configs
 CLAUDE_LAUNCH_CONFIG_DIR=${CLAUDE_LAUNCH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/claude-launch/configs}
+# One-time move of configs saved by earlier vibe-tunnel versions.
+if [ -d "$VT_OLD_CONFIG_DIR" ] && [ ! -e "$VT_CONFIG_DIR" ] && [ "$VT_CONFIG_DIR" = "$VT_STATE_DIR/configs" ]; then
+    mkdir -p "$VT_STATE_DIR" && mv "$VT_OLD_CONFIG_DIR" "$VT_CONFIG_DIR" 2>/dev/null || true
+fi
 
 VT_CODE_CLI=${VT_CODE_CLI:-$VIBE_TUNNEL_DIR/cli/code}
 [ -x "$VT_CODE_CLI" ] || { [ -x "$HOME/code" ] && VT_CODE_CLI=$HOME/code; } || true
 
-export VIBE_TUNNEL_DIR VT_STATE_DIR VT_LOG_DIR VT_IMAGE VT_SHELLRC VT_DEFAULT_HOME VT_CONFIG_DIR CLAUDE_LAUNCH_CONFIG_DIR VT_CODE_CLI EULER_VIBE_DIR
+export VIBE_TUNNEL_DIR VT_STATE_DIR VT_LOG_DIR VT_IMAGE VT_SHELLRC VT_DEFAULT_HOME VT_CONFIG_DIR VT_OLD_CONFIG_DIR CLAUDE_LAUNCH_CONFIG_DIR VT_CODE_CLI EULER_VIBE_DIR
 
 # --- config files ------------------------------------------------------------------
 # Only the keys we (or claude-launch) write are allowed, so a config file stays
@@ -114,10 +121,17 @@ config_field() {  # config_field FILE VAR
     ( set +eu; . "$1" >/dev/null 2>&1; printf '%s' "${!2:-}" )
 }
 
-# Path of a saved config by name: own dir first, then claude-launch's.
+# Tunnel names: VS Code allows lowercase letters, digits and hyphens, max 20 chars.
+sanitize_name() {
+    local n
+    n=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed 's/^-*//; s/-*$//; s/--*/-/g')
+    printf '%s' "${n:0:20}"
+}
+
+# Path of a saved config by name: own dir first, then the older locations.
 find_config() {
     local n=$1 d
-    for d in "$VT_CONFIG_DIR" "$CLAUDE_LAUNCH_CONFIG_DIR"; do
+    for d in "$VT_CONFIG_DIR" "$VT_OLD_CONFIG_DIR" "$CLAUDE_LAUNCH_CONFIG_DIR"; do
         [ -f "$d/$n.conf" ] && { printf '%s' "$d/$n.conf"; return; }
     done
     return 1
@@ -144,11 +158,15 @@ vt_resolve_sandbox() {
 # Fills CONTAINER_ARGS for `singularity exec`. Needs WORKSPACE, CLAUDE_MOBILE_HOME,
 # RW_BINDS, RO_BINDS and VT_TMPDIR. Extra --bind/--env can be appended by the caller.
 vt_container_args() {
+    # The workspace keeps its cluster path inside the container, so absolute
+    # paths in scripts, symlinks, environments and Claude's per-project memory
+    # stay valid; /workspace is a second mount of the same directory.
     CONTAINER_ARGS=(
         --nv
         --cleanenv
         --containall
         --home "$CLAUDE_MOBILE_HOME:/home"
+        --bind "$WORKSPACE:$WORKSPACE"
         --bind "$WORKSPACE:/workspace"
         --bind "$VT_TMPDIR:/tmp"
         --bind "$VT_ENTRY:/opt/vibe-tunnel/entry:ro"

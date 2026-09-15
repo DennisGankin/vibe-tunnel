@@ -25,9 +25,9 @@ set -euo pipefail
 #   vibe-tunnel profiles new NAME [--from BASE]   create your own profile from a preset and edit it
 #   vibe-tunnel doctor                    check image, CLI, proxy, dirs
 #
-# Saved configs: ${XDG_CONFIG_HOME:-~/.config}/vibe-tunnel/configs/NAME.conf, the same
-# format as claude-launch (WORKSPACE, MODE, CLAUDE_MOBILE_HOME, RW_BINDS, RO_BINDS) plus
-# PROFILE and LABEL. Existing claude-launch configs are read as a fallback.
+# Saved configs: ~/.vibe-tunnel/configs/NAME.conf, the same format as claude-launch
+# (WORKSPACE, MODE, CLAUDE_MOBILE_HOME, RW_BINDS, RO_BINDS) plus PROFILE, LABEL and
+# resource overrides. Older locations (~/.config/vibe-tunnel, claude-launch) are read too.
 # The laptop client only calls these subcommands over ssh.
 
 VT_BIN=$(realpath "$0")
@@ -64,13 +64,6 @@ abspath() {
     case "$1" in /*) printf '%s' "$1" ;; *) printf '%s/%s' "$(pwd)" "$1" ;; esac
 }
 
-# Tunnel names: VS Code allows lowercase letters, digits and hyphens, max 20 chars.
-sanitize_name() {
-    local n
-    n=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed 's/^-*//; s/-*$//; s/--*/-/g')
-    printf '%s' "${n:0:20}"
-}
-
 resolve_profile() {
     local p=$1
     if [ -f "$p" ]; then realpath "$p"; return; fi
@@ -103,6 +96,7 @@ squeue_jobs() {
 # or no match yet (job still pending) is normal and must not trip set -e/pipefail.
 log_link()   { { grep -Eo 'Open this link in your browser[[:space:]]+https?://[^[:space:]]+' "$1" 2>/dev/null | tail -n1 | awk '{print $NF}'; } || true; }
 log_tunnel() { { grep -Eo '^VT_TUNNEL_NAME=.*' "$1" 2>/dev/null | tail -n1 | cut -d= -f2; } || true; }
+log_workspace() { { grep -Eo '^VT_WORKSPACE=.*' "$1" 2>/dev/null | tail -n1 | cut -d= -f2-; } || true; }
 log_device() { { grep -Eo 'log into[[:space:]]+https?://[^[:space:]]+[[:space:]]+and use code[[:space:]]+[A-Za-z0-9-]+' "$1" 2>/dev/null | tail -n1 | awk '{print $3 " " $NF}'; } || true; }
 
 # --- sandbox options (shared by submit / claude / shell) --------------------
@@ -175,6 +169,7 @@ cmd_submit() {
         # A saved config may carry its profile, resource overrides and label; explicit flags win.
         [ -n "$profile" ] || profile=$(config_field "$OPT_CF" PROFILE)
         [ -n "$label" ]   || label=$(config_field "$OPT_CF" LABEL)
+        [ -n "$label" ]   || label=$OPT_CONFIG      # a stable tunnel name per config
         for k in "${RESOURCE_KEYS[@]}"; do
             eval "v=\${R_$k:-}"
             [ -n "$v" ] || eval "R_$k=\$(config_field \"\$OPT_CF\" $k)"
@@ -252,12 +247,12 @@ cmd_status() {
         return 0
     fi
     [ "$porcelain" -eq 1 ] || printf '%s%-10s %-28s %-9s %-10s %-9s %-9s %s%s\n' "$BOLD" JOBID NAME STATE NODE ELAPSED LEFT TUNNEL "$RST"
-    local id name state node elapsed left log tunnel link
+    local id name state node elapsed left log tunnel link ws
     while IFS='|' read -r id name state node elapsed left; do
         log=$VT_LOG_DIR/$id.log
-        tunnel=$(log_tunnel "$log"); link=$(log_link "$log")
+        tunnel=$(log_tunnel "$log"); link=$(log_link "$log"); ws=$(log_workspace "$log")
         if [ "$porcelain" -eq 1 ]; then
-            printf '%s|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$name" "$state" "$node" "$elapsed" "$left" "$tunnel" "$link"
+            printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$name" "$state" "$node" "$elapsed" "$left" "$tunnel" "$link" "$ws"
         else
             printf '%-10s %-28s %-9s %-10s %-9s %-9s %s\n' "$id" "$name" "$state" "${node:--}" "$elapsed" "$left" "${tunnel:--}"
             [ -z "$link" ] || printf '           %s%s%s\n' "$DIM" "$link" "$RST"
@@ -339,8 +334,9 @@ cmd_wait() {
             esac
         fi
         if [ -n "$link" ] && [ -n "$tunnel" ]; then
+            local ws; ws=$(log_workspace "$log"); ws=${ws:-/workspace}
             printf '\n  %sTunnel is up.%s\n' "$GREEN" "$RST"
-            printf 'TUNNEL=%s\nLINK=%s\nDESKTOP=code --folder-uri %q\n' "$tunnel" "$link" "vscode-remote://tunnel+$tunnel/workspace"
+            printf 'TUNNEL=%s\nWORKSPACE=%s\nLINK=%s\nDESKTOP=code --folder-uri %q\n' "$tunnel" "$ws" "$link" "vscode-remote://tunnel+$tunnel$ws"
             return 0
         fi
         case "$state" in
@@ -360,9 +356,9 @@ cmd_launch() { exec "$VIBE_TUNNEL_DIR/bin/vibe-tunnel-launch" "$@"; }
 cmd_configs() {
     local porcelain=0; [ "${1:-}" = "--porcelain" ] && porcelain=1
     local d f name ws hd pr lb src pp found=0 seen=" "
-    for d in "$VT_CONFIG_DIR" "$CLAUDE_LAUNCH_CONFIG_DIR"; do
+    for d in "$VT_CONFIG_DIR" "$VT_OLD_CONFIG_DIR" "$CLAUDE_LAUNCH_CONFIG_DIR"; do
         [ -d "$d" ] || continue
-        [ "$d" = "$VT_CONFIG_DIR" ] && src=vibe-tunnel || src=claude-launch
+        case "$d" in "$VT_CONFIG_DIR") src=vibe-tunnel ;; "$VT_OLD_CONFIG_DIR") src=old-location ;; *) src=claude-launch ;; esac
         for f in "$d"/*.conf; do
             [ -e "$f" ] || continue
             name=${f##*/}; name=${name%.conf}
@@ -384,12 +380,12 @@ cmd_configs() {
                     printf '  %-20s %s%s%s\n' "" "$DIM" "$(resources_summary "$pp")" "$RST"
                     for k in "${RESOURCE_KEYS[@]}"; do eval "R_$k="; done
                 fi
-                [ "$src" = claude-launch ] && printf '  %-20s %s(from claude-launch)%s\n' "" "$DIM" "$RST"
+                [ "$src" = vibe-tunnel ] || printf '  %-20s %s(from %s; re-save to move it to %s)%s\n' "" "$DIM" "$src" "$VT_CONFIG_DIR" "$RST"
             fi
         done
     done
     if [ "$found" -eq 0 ] && [ "$porcelain" -eq 0 ]; then
-        echo "No saved configs in $VT_CONFIG_DIR (or $CLAUDE_LAUNCH_CONFIG_DIR)."
+        echo "No saved configs in $VT_CONFIG_DIR."
         echo "Create one with 'vibe-tunnel launch' -> 'Save current config', or pass --workspace/--rw/--ro directly."
     fi
 }
@@ -471,7 +467,7 @@ cmd_doctor() {
     if [ -n "${http_proxy:-}${HTTP_PROXY:-}" ]; then ok "proxy set: ${http_proxy:-$HTTP_PROXY}"
     else warn "no http_proxy in this shell (jobs run 'module load eth_proxy' themselves)"; fi
     local n m; n=$(ls "$VT_CONFIG_DIR"/*.conf 2>/dev/null | wc -l | tr -d ' '); m=$(ls "$CLAUDE_LAUNCH_CONFIG_DIR"/*.conf 2>/dev/null | wc -l | tr -d ' ')
-    ok "saved configs: $n own, $m from claude-launch"
+    ok "saved configs: $n in $VT_CONFIG_DIR, $m from claude-launch"
     echo
     cmd_profiles
 }
