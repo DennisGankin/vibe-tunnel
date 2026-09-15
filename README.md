@@ -148,7 +148,7 @@ The menu offers these as *mode* too (tunnel / claude / shell).
 
 | Symptom | Cause / fix |
 |---|---|
-| `vibe-tunnel` on the laptop hangs, or `ssh euler failed` although plain `ssh euler` works | A half-dead multiplexed ssh connection after a VPN/network hiccup. The client resets it automatically since v0.3; by hand: `ssh -O exit -o ControlPath=~/.ssh/vibe-tunnel-%C euler` |
+| `vibe-tunnel` on the laptop hangs, or `ssh euler failed` although plain `ssh euler` works | A half-dead multiplexed ssh connection after a VPN/network hiccup. The client detects and resets it automatically; by hand: `ssh -O exit -o ControlPath=~/.ssh/vibe-tunnel-%C euler` |
 | Menu keys react slowly | Usually the same stale ssh connection (above). If `squeue -u $USER` itself takes seconds on Euler, slurm is slow; the menu waits for it when drawing the home screen |
 | "Uh oh, we couldn't find anything" on GitHub's device page | An already-used login code was shown (fixed for reopen). A fresh job that really needs a login prints a new code in `vibe-tunnel logs <jobid>` |
 | Asked to log in to VS Code on every job | The saved token is not being reused: look for `reusing saved VS Code login` in the job log and for `token.json` in `<sandbox home>/.vscode-cli/` |
