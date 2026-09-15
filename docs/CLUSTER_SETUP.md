@@ -48,7 +48,7 @@ Expected in the log, in order:
 2. `vibe-tunnel: claude: /home/.local/bin/claude 2.x` (first time: the native install runs before that)
 3. `vibe-tunnel: vscode cli: 1.1xx`
 4. first time per home: `To grant access to the server, please log into https://github.com/login/device and use code XXXX-XXXX`
-5. `Open this link in your browser https://vscode.dev/tunnel/test/workspace`
+5. the tunnel link: `Open this link in your browser https://vscode.dev/tunnel/...` (older CLI) or `➜  Open:  https://vscode.dev/tunnel/...` (CLI ≥ 1.13x)
 
 Then, on the laptop: the `code --folder-uri ...` line that `vibe-tunnel wait` prints (the workspace keeps its cluster path inside the container). The integrated terminal should show the `(vibe-tunnel)` prompt, `pwd` = the workspace's cluster path, `claude --version` works, and `ls /` shows the container, not the node.
 
@@ -59,7 +59,8 @@ Then, on the laptop: the `code --folder-uri ...` line that `vibe-tunnel wait` pr
 Status after the first real run on Euler (2026-09-15, CLI 1.125.1 from `~/code`, euler-vibe's image 651 MB; the standalone `images/vibe-tunnel.def` was built on Euler on 2026-09-15 via `setup.sh` and runs tunnels):
 
 - confirmed: tunnel relay reachable from inside the container via the forwarded proxy; `vscode-remote://tunnel+NAME/workspace` opens in desktop VS Code; `~/.bashrc` block and euler-vibe shellrc active in VS Code terminals (`claude` function present); `HOME=/home` with the sandbox state; laptop-side submit / wait / open / reopen (with the earlier Python launcher; the bash client uses the same remote commands).
-- not confirmed: `--install-extension` did not preinstall Claude Code with CLI 1.125.1 (see section 6); `token.json` reuse and `unregister` on stop still to be checked in the log.
+- confirmed later the same day with CLI 1.137 from `setup.sh`: `--install-extension` preinstalls Claude Code (`Preloading extensions … Extension install complete`), `token.json` is saved and reused; the CLI prints the link as `➜  Open:  URL` (handled).
+- not confirmed: `unregister` on stop, check the end of a job log once.
 
 Each remaining assumption has a fallback; fix the script if reality differs.
 
@@ -67,7 +68,7 @@ Each remaining assumption has a fallback; fix the script if reality differs.
 |---|---|---|
 | The tunnel relay is reachable from inside the container via the `eth_proxy` variables forwarded with `SINGULARITYENV_*`/`APPTAINERENV_*` | `bin/vibe-tunnel-job` | `code tunnel` logs connection errors. `codeserver_tunnel` works on the host with the same proxy, so compare `env | grep -i proxy` inside a `claude-mobile shell` |
 | `VSCODE_CLI_USE_FILE_KEYCHAIN=1` makes the CLI keep its login in `<cli-data-dir>/token.json`; the job copies it to/from the per-user store `~/.vibe-tunnel/vscode-auth/` (mounted at `/opt/vibe-tunnel/vscode-auth`), so one GitHub login serves every sandbox home | `bin/vibe-tunnel-entry`, `bin/vibe-tunnel-lib` | you get the device-code prompt on every job. Look in `~/.vscode-cli/jobs/<jobid>/` in the sandbox home for the real file name and adjust `SHARED_TOKEN` |
-| `code tunnel --install-extension ID` exists in the current CLI | `bin/vibe-tunnel-entry` (checked at runtime via `--help`) | it is skipped with a log line; install Claude Code from the Extensions view once, it persists in `/home/.vscode-server` |
+| `code tunnel --install-extension ID` exists in the current CLI | `bin/vibe-tunnel-entry` (checked at runtime via `--help`) | confirmed with 1.137; with an older CLI it is skipped with a log line and Claude Code is installed from the Extensions view once |
 | `code tunnel unregister` on exit frees the tunnel name (accounts are capped at a handful of tunnels) | `bin/vibe-tunnel-entry` | stale tunnels accumulate; clean up with `code tunnel unregister` / the Remote Explorer in VS Code |
 | `--signal=B:TERM@120` reaches the job script and Apptainer forwards TERM into the container | `profiles/*.sbatch`, `bin/vibe-tunnel-job` | the tunnel is killed without unregistering (harmless, see previous row) |
 | `vscode-remote://tunnel+<name>/workspace` opens the tunnel in desktop VS Code | `bin/vibe-tunnel-client` | use the printed `https://vscode.dev/tunnel/...` link and its *Open in VS Code Desktop* button |

@@ -98,7 +98,8 @@ squeue_jobs() {
 
 # Extract what the launcher needs from a job log. Always succeed: a missing log
 # or no match yet (job still pending) is normal and must not trip set -e/pipefail.
-log_link()   { { grep -Eo 'Open this link in your browser[[:space:]]+https?://[^[:space:]]+' "$1" 2>/dev/null | tail -n1 | awk '{print $NF}'; } || true; }
+# CLI <= 1.12x: "Open this link in your browser URL"; CLI >= 1.13x: "  ➜  Open:  URL"
+log_link()   { { grep -Eo '(Open this link in your browser|Open:)[[:space:]]+https?://[^[:space:]]+' "$1" 2>/dev/null | tail -n1 | awk '{print $NF}'; } || true; }
 log_tunnel() { { grep -Eo '^VT_TUNNEL_NAME=.*' "$1" 2>/dev/null | tail -n1 | cut -d= -f2; } || true; }
 log_workspace() { { grep -Eo '^VT_WORKSPACE=.*' "$1" 2>/dev/null | tail -n1 | cut -d= -f2-; } || true; }
 log_device() { { grep -Eo 'log into[[:space:]]+https?://[^[:space:]]+[[:space:]]+and use code[[:space:]]+[A-Za-z0-9-]+' "$1" 2>/dev/null | tail -n1 | awk '{print $3 " " $NF}'; } || true; }
