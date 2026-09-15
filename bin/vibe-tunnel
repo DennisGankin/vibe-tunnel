@@ -325,7 +325,10 @@ cmd_wait() {
             printf '  %s[%s]%s job %s: %s%s\n' "$DIM" "$(date '+%H:%M:%S')" "$RST" "$id" "$state" "${node:+ on $node}"
             last_state=$state
         fi
-        dev=$(log_device "$log")
+        link=$(log_link "$log"); tunnel=$(log_tunnel "$log")
+        # A device code is only current while the tunnel is not up yet; once the
+        # link is in the log the code has been used (or will never be needed).
+        dev=; [ -n "$link" ] || dev=$(log_device "$log")
         if [ -n "$dev" ]; then
             url=${dev% *}; code=${dev##* }
             case "$seen_codes" in *" $code "*) ;; *)
@@ -335,7 +338,6 @@ cmd_wait() {
                 printf 'DEVICE_URL=%s\nDEVICE_CODE=%s\n' "$url" "$code" ;;
             esac
         fi
-        link=$(log_link "$log"); tunnel=$(log_tunnel "$log")
         if [ -n "$link" ] && [ -n "$tunnel" ]; then
             printf '\n  %sTunnel is up.%s\n' "$GREEN" "$RST"
             printf 'TUNNEL=%s\nLINK=%s\nDESKTOP=code --folder-uri %q\n' "$tunnel" "$link" "vscode-remote://tunnel+$tunnel/workspace"

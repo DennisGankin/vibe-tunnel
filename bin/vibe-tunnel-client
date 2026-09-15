@@ -168,10 +168,13 @@ cmd_launch() {
     fi
     id=${after%% *}
     case "$after" in
-        *" reopen "*) ;;
-        *) printf '  %swaiting for job %s (Ctrl-C stops waiting; the job keeps running)…%s\n' "$DIM" "$id" "$RST" ;;
+        *" reopen "*)
+            # Already up: connect from the status list, no waiting or login involved.
+            cmd_open "$id" ;;
+        *)
+            printf '  %swaiting for job %s (Ctrl-C stops waiting; the job keeps running)…%s\n' "$DIM" "$id" "$RST"
+            wait_and_open "$id" ;;
     esac
-    wait_and_open "$id"
 }
 
 cmd_submit() {
