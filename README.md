@@ -20,9 +20,9 @@ The client then runs that installation's `setup.sh` on the cluster for you, whic
 ```bash
 vibe-tunnel
 ```
-Two one-time logins on the first tunnel: the VS Code tunnel (GitHub device code, handled by the launcher; once
-per user), Claude inside the container (`claude` in a VS Code terminal; once per sandbox home), and installing
-the Claude Code extension in the tunnel (once per sandbox home).
+Two one-time logins on the first tunnel: the VS Code tunnel (GitHub device code; the launcher opens the page and
+copies the code; once per user) and Claude inside the container (`claude` in a VS Code terminal, or the
+preinstalled Claude Code extension; once per sandbox home).
 
 Your configs, profiles, logs and sandbox home live in `~/.vibe-tunnel` (mode 700); nothing you do touches the
 shared directory. Problems? See [Troubleshooting](#troubleshooting). Other groups: see the maintainer guide in
@@ -172,7 +172,13 @@ code --install-extension vscode-extension/vibe-tunnel-0.1.4.vsix
 If you use VS Code **profiles**, install it into the profile you work in: `code --profile <name> --install-extension …`,
 or *Extensions → ··· → Install from VSIX…* inside that profile. Extensions are per profile.
 Set *vibe-tunnel › Host* and *Remote Dir* in the settings (defaults: `euler` and the Beltrao lab's shared
-installation). The extension needs ssh to work without prompts: an ssh key in your agent, or *Log in via
+installation). The extension needs ssh to work without prompts. On macOS, load your key into the agent once with
+the passphrase kept in the keychain, then neither the extension nor `ssh euler` ever ask again:
+
+```bash
+ssh-add --apple-use-keychain ~/.ssh/<your euler key>
+```
+(and `AddKeysToAgent yes` / `UseKeychain yes` in the `Host euler` block of `~/.ssh/config`). Alternatively *Log in via
 terminal* once from the sidebar (macOS/Linux; the connection is then reused for 15 minutes). It runs on Windows
 without WSL, since Windows ships OpenSSH. Details in [vscode-extension/README.md](vscode-extension/README.md).
 
