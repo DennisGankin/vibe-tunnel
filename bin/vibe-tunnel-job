@@ -93,6 +93,10 @@ banner() {
     echo "workspace  : $WORKSPACE  (same path in the container; also /workspace)"
     echo "home       : $CLAUDE_MOBILE_HOME  -> /home"
     echo "tmp        : $VT_TMPDIR  -> /tmp"
+    if [ -n "${SLURM_JOB_ID:-}" ]; then
+        local tl; tl=$(squeue -h -j "$SLURM_JOB_ID" -o %l 2>/dev/null | head -n1 | awk '{print $1}' || true)
+        echo "allocated  : ${SLURM_CPUS_PER_TASK:-?} cpus · ${SLURM_MEM_PER_CPU:-?} MB per cpu${SLURM_MEM_PER_NODE:+ (${SLURM_MEM_PER_NODE} MB total)} · gpus ${SLURM_JOB_GPUS:-${SLURM_GPUS:-none}} · time limit ${tl:-?} · partition ${SLURM_JOB_PARTITION:-?}"
+    fi
     for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do echo "bind (rw)  : $b"; done
     for b in "${RO_BINDS[@]+"${RO_BINDS[@]}"}"; do echo "bind (ro)  : $b"; done
 }
@@ -127,4 +131,11 @@ while :; do
     kill -0 "$child" 2>/dev/null || break
 done
 log "container exited with status $status"
+if [ "$status" -ne 0 ] && [ -n "${SLURM_JOB_ID:-}" ]; then
+    # Make the failure readable without an sacct round trip.
+    case "$status" in
+        135|137) log "status $status means the container was killed (SIGBUS/SIGKILL): almost always out of memory. Allocated: ${SLURM_MEM_PER_CPU:-?} MB per cpu x ${SLURM_CPUS_PER_TASK:-?} cpus. The first launch into a fresh sandbox home needs ~1 GB for the Claude install; raise 'Memory per CPU' (with a unit, e.g. 2G) in Resources." ;;
+    esac
+    sacct -j "$SLURM_JOB_ID" -P -o JobID,State,ExitCode,MaxRSS,ReqMem,Elapsed 2>/dev/null | sed 's/^/sacct: /' || true
+fi
 exit "$status"

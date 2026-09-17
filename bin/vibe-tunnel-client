@@ -96,13 +96,22 @@ connect() {
     mkdir -p "$HOME/.ssh"
     reset_stale_master
     # Interactive once (passphrase / OTP); later calls reuse the control connection.
-    local err
-    if ! err=$(ssh "${SSH_OPTS[@]}" "$VT_HOST" true 2>&1 >/dev/null); then
+    # One round trip for connectivity and the installation check (each ssh call
+    # may prompt for a passphrase where multiplexing is unavailable, e.g. Git Bash).
+    local out err
+    if ! out=$(ssh "${SSH_OPTS[@]}" "$VT_HOST" "test -x $(printf '%q' "$VT_REMOTE_DIR/bin/vibe-tunnel") && echo VT_OK || echo VT_MISSING" 2>/tmp/vt-ssh-err.$$); then
+        err=$(cat /tmp/vt-ssh-err.$$ 2>/dev/null); rm -f /tmp/vt-ssh-err.$$
         [ -z "$err" ] || printf '%s\n' "$err" >&2
         die "ssh $VT_HOST failed. Try a plain 'ssh $VT_HOST' first (network/VPN, ~/.ssh/config)."
     fi
-    rsh "test -x $(printf '%q' "$VT_REMOTE_DIR/bin/vibe-tunnel")" \
-        || die "$VT_REMOTE_DIR/bin/vibe-tunnel not found on $VT_HOST. Set VT_REMOTE_DIR with: vibe-tunnel client-setup"
+    rm -f /tmp/vt-ssh-err.$$
+    case "$out" in
+        *VT_OK*) ;;
+        *) die "$VT_REMOTE_DIR/bin/vibe-tunnel not found on $VT_HOST. Set VT_REMOTE_DIR with: vibe-tunnel client-setup" ;;
+    esac
+    if [ "$VT_SSH_MUX" = 0 ] && ! ssh-add -l >/dev/null 2>&1; then
+        warn "no key in your ssh agent and no connection sharing on this platform: every step will ask for your passphrase. Run 'eval \$(ssh-agent); ssh-add' first."
+    fi
 }
 
 # --- opening ---------------------------------------------------------------------------
@@ -216,8 +225,8 @@ cmd_client_setup() {
 
 cmd_launch() {
     local before after id
-    before=$(rsh 'cat ~/.vibe-tunnel/last-job 2>/dev/null' || true)
     # The menu needs a tty on the cluster; it returns right after submitting.
+    before=$(rsh 'cat ~/.vibe-tunnel/last-job 2>/dev/null' || true)
     rvtt launch --no-wait "$@" || true
     after=$(rsh 'cat ~/.vibe-tunnel/last-job 2>/dev/null' || true)
     if [ -z "$after" ] || [ "$after" = "$before" ]; then

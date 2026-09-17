@@ -109,6 +109,22 @@ sync_token() {  # persist a fresh login for the next job
 # Drop old per-job dirs (keep this job's) so the home does not fill up.
 find "$CLI_ROOT/jobs" -mindepth 1 -maxdepth 1 -type d ! -name "${VT_JOB_ID:-$$}" -mtime +7 -exec rm -rf {} + 2>/dev/null || true
 
+# Extensions that make no sense inside the container but arrive via Settings
+# Sync (Dev Containers tries to install a second server and blocks the first
+# connection) are pinned to the local side through the server's machine settings.
+MACHINE_SETTINGS=$SERVER_DATA_DIR/data/Machine/settings.json
+PIN='{"remote.extensionKind": {"ms-vscode-remote.remote-containers": ["ui"], "ms-vscode-remote.remote-wsl": ["ui"], "ms-vscode-remote.remote-ssh": ["ui"]}}'
+mkdir -p "$(dirname "$MACHINE_SETTINGS")"
+if [ ! -s "$MACHINE_SETTINGS" ]; then
+    printf '%s\n' "$PIN" > "$MACHINE_SETTINGS" && log "wrote machine settings (Dev Containers pinned to the local side)"
+elif ! grep -q 'remote.extensionKind' "$MACHINE_SETTINGS"; then
+    if command -v jq >/dev/null 2>&1 && jq -s '.[0] * .[1]' "$MACHINE_SETTINGS" <(printf '%s' "$PIN") > "$MACHINE_SETTINGS.new" 2>/dev/null; then
+        mv "$MACHINE_SETTINGS.new" "$MACHINE_SETTINGS" && log "added remote.extensionKind to machine settings"
+    else
+        log "note: add remote.extensionKind for ms-vscode-remote.remote-containers to $MACHINE_SETTINGS to keep Dev Containers out of the tunnel"
+    fi
+fi
+
 # --- 4. tunnel flags -------------------------------------------------------------
 TUNNEL_ARGS=(
     tunnel

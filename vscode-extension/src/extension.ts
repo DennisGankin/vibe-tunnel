@@ -362,25 +362,45 @@ async function editBinds(state: ConfigDetail): Promise<void> {
   }
 }
 
+/** Same rules as the CLI's validate_resource: memory needs a unit (a bare number is MB to slurm). */
+function validateResource(key: string, v: string): string | undefined {
+  if (!v) { return undefined; }
+  if (key === 'mem' && !/^[0-9]+[KkMmGgTt]$/.test(v)) { return 'memory needs a unit, e.g. 2G or 4000M (a bare number means MB to slurm)'; }
+  if (key === 'cpus' && !/^[1-9][0-9]*$/.test(v)) { return 'CPUs must be a whole number'; }
+  if (key === 'time' && !/^([0-9]+-)?[0-9]+(:[0-9]{2}){0,2}$/.test(v)) { return 'time must look like 04:00:00, 2-00:00:00 or 90 (minutes)'; }
+  return undefined;
+}
+
+/** The profile's value of one field, parsed from the `profiles --porcelain` summary ("mem-per-cpu=2G time=…"). */
+function profileValue(summary: string, key: string): string {
+  const flag: Record<string, string> = { time: 'time', cpus: 'cpus-per-task', mem: 'mem-per-cpu', gpus: 'gpus', partition: 'partition', account: 'account' };
+  const m = new RegExp(`(?:^|\\s)${flag[key]}=(\\S+)`).exec(summary);
+  return m ? m[1] : '';
+}
+
 async function editResources(state: ConfigDetail, profiles: { name: string; summary: string }[]): Promise<void> {
   for (;;) {
     const fields: [keyof ConfigDetail, string, string][] = [
-      ['time', 'Time limit', 'd-hh:mm:ss, e.g. 04:00:00 or 2-00:00:00'], ['cpus', 'CPUs', 'e.g. 16'], ['mem', 'Memory per CPU', 'e.g. 2G'],
+      ['time', 'Time limit', 'd-hh:mm:ss, e.g. 04:00:00 or 2-00:00:00'], ['cpus', 'CPUs', 'e.g. 16'], ['mem', 'Memory per CPU', 'with unit: 2G or 4000M (a bare number = MB!)'],
       ['gpus', 'GPUs', 'e.g. a100:1 or rtx_4090:4'], ['partition', 'Partition', ''], ['account', 'Account', 'e.g. es_biol']];
     const summary = profiles.find(p => p.name === state.profile)?.summary ?? '';
     type R = vscode.QuickPickItem & { key: string };
     const items: R[] = [{ label: `$(server) Profile: ${state.profile || '(none)'}`, description: summary, key: 'profile' }];
     for (const [k, label] of fields) {
       const v = state[k] as string;
-      items.push({ label: `${label}: ${v || '(profile default)'}`, description: v ? 'override' : '', key: k as string });
+      const pv = profileValue(summary, k as string);
+      items.push(v
+        ? { label: `${label}: ${v}  *`, description: `override (profile: ${pv || 'not set'})`, key: k as string }
+        : { label: `${label}: ${pv || '(not set)'}`, description: 'profile', key: k as string });
     }
     items.push({ label: '', kind: vscode.QuickPickItemKind.Separator, key: '' }, { label: '$(discard) Reset overrides', key: 'reset' }, { label: '$(check) Done', key: 'done' });
-    const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Resources: profile defaults, overridden per field (passed to sbatch as flags)', ignoreFocusOut: true });
+    const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Resources: values marked * are your overrides, the rest come from the profile (all passed to sbatch)', ignoreFocusOut: true });
     if (!pick || pick.key === 'done') { return; }
     if (pick.key === 'reset') { for (const [k] of fields) { (state as any)[k] = ''; } continue; }
     if (pick.key === 'profile') { const p = await pickProfile(state.profile); if (p) { state.profile = p; } continue; }
     const f = fields.find(x => x[0] === pick.key)!;
-    const v = await vscode.window.showInputBox({ prompt: `${f[1]} (${f[2]}). Empty = the profile's value.`, value: state[f[0]] as string, ignoreFocusOut: true });
+    const v = await vscode.window.showInputBox({ prompt: `${f[1]} (${f[2]}). Empty = the profile's value.`, value: state[f[0]] as string, ignoreFocusOut: true,
+      validateInput: (x) => validateResource(f[0] as string, x.trim()) });
     if (v !== undefined) { (state as any)[f[0]] = v.trim(); }
   }
 }
