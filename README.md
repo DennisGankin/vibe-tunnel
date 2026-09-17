@@ -60,7 +60,7 @@ The VS Code CLI is not baked into the image: it is a static binary that gets bin
 - **Persistent home.** Auth for Claude, the VS Code login, the downloaded VS Code server and extensions live in the sandbox home (`/home` in the container, `~/.vibe-tunnel/home` by default), so the second start is fast and needs no logins.
 - **Stable tunnel names.** A config's tunnel is named after the config unless you set a label, so VS Code's recent list and `vibe-tunnel open NAME` keep working across jobs.
 - **Several tunnels at once**, each with its own label, node and resources. Reopen a running one instead of resubmitting.
-- **Resources are editable in the menu.** Profiles (`profiles/*.sbatch`) are presets; the *Resources* entry shows time, CPUs, memory per CPU, GPUs, partition and account, lets you change any of them, and saves the values with the config. Overrides are passed to `sbatch` as flags and beat the profile's `#SBATCH` lines. `vibe-tunnel profiles edit|new NAME` edits or creates a preset (your copies live in `~/.vibe-tunnel/profiles/` and shadow the repo's).
+- **Resources are editable in the menu.** Profiles (`profiles/*.sbatch`) are presets; the *Resources* entry shows time, CPUs, memory per CPU, GPUs, partition and account, lets you change any of them, and saves the values with the config. Memory always takes a unit (`2G`); the inputs refuse a bare number because slurm would read it as megabytes. Overrides are passed to `sbatch` as flags and beat the profile's `#SBATCH` lines. `vibe-tunnel profiles edit|new NAME` edits or creates a preset (your copies live in `~/.vibe-tunnel/profiles/` and shadow the repo's).
 - **One command, both places.** `vibe-tunnel` is bash: on the cluster it is the CLI, on the laptop (no slurm) it drives the cluster copy over ssh. No Python, no environment.
 
 ## Quick start (own installation, other groups)
@@ -153,6 +153,9 @@ The menu offers these as *mode* too (tunnel / claude / shell).
 | "Uh oh, we couldn't find anything" on GitHub's device page | An already-used login code was shown (fixed for reopen). A fresh job that really needs a login prints a new code in `vibe-tunnel logs <jobid>` |
 | Asked to log in to VS Code on every job | The saved token is not being reused: look for `reusing saved VS Code login` in the job log and for `~/.vibe-tunnel/vscode-auth/token.json` on the cluster |
 | Job ends before the link appears | `vibe-tunnel logs <jobid>`: a missing workspace directory, a wrong account/partition (`sbatch` error), or the container image missing |
+| `Bus error` / container exit 135 or 137 / job OOM-killed on the first launch | Too little memory. The first launch into a fresh sandbox home installs Claude (~1 GB peak). Check the `allocated:` line in the job log; memory always needs a unit (`2G`, `4000M`): a bare number is megabytes to slurm |
+| "job ended before the tunnel came up" although the job is running | Older versions gave up after one failed `squeue`/`sacct` query (slurm timing out). Fixed: `wait` now only stops on a terminal job state and says "slurm not answering" otherwise |
+| First connection hangs in "Setting up Dev Containers…" | The Dev Containers extension arrived via Settings Sync and tries to install a second server inside the container. Fixed for new sandbox homes (pinned to the local side in the server's machine settings); for an existing one, disable *Dev Containers* for the remote and reload, or add `"remote.extensionKind": {"ms-vscode-remote.remote-containers": ["ui"]}` to `<sandbox home>/.vscode-server/data/Machine/settings.json` |
 | No Claude Code extension in the tunnel | It is preinstalled with VS Code CLI ≥ 1.13x (`cli/code` from `setup.sh`); an old `~/code` CLI cannot. Otherwise install it once from the Extensions view (choose the install button for the tunnel) |
 | VS Code opens but the terminal starts in `/` | No folder open: File → Open Folder → your workspace path, or use the `code --folder-uri …` line that `vibe-tunnel wait` prints |
 | `claude` asks for login although you logged in before | Different sandbox home: each home has its own login. Check `Home` in the menu's Sandbox screen; the default is `~/.vibe-tunnel/home` |
@@ -167,7 +170,7 @@ The same thing as a sidebar inside VS Code: running tunnels (click to connect, s
 setup with a remote directory browser. Install the `.vsix` from [vscode-extension/](vscode-extension/):
 
 ```bash
-code --install-extension vscode-extension/vibe-tunnel-0.1.4.vsix
+code --install-extension vscode-extension/vibe-tunnel-0.1.5.vsix
 ```
 If you use VS Code **profiles**, install it into the profile you work in: `code --profile <name> --install-extension …`,
 or *Extensions → ··· → Install from VSIX…* inside that profile. Extensions are per profile.
@@ -196,8 +199,10 @@ key into WSL's `~/.ssh/config`, clone, `./setup.sh --client`. Install the *WSL* 
 login page opens in your Windows browser and the code lands in the Windows clipboard.
 
 **Git Bash** (comes with Git for Windows) also works: same steps in a Git Bash window, `~/.ssh/config` lives in
-`C:\Users\<you>\.ssh`. ssh connection multiplexing is disabled there automatically, so each command
-authenticates again; use an ssh key with the agent (`eval $(ssh-agent); ssh-add`) to avoid retyping.
+`C:\Users\<you>\.ssh`. **Prerequisite there: an ssh key loaded in the agent.** Connection sharing is off on
+Git Bash, so every step is a separate ssh login and a passphrase would be asked four or five times per launch.
+Once per Git Bash session: `eval $(ssh-agent); ssh-add ~/.ssh/<your key>` (the client warns when no key is
+loaded). If your Git Bash's ssh supports connection sharing, `VT_SSH_MUX=1` turns it back on.
 
 Not supported: plain PowerShell/cmd (no bash). Status: implemented but not yet tested by a Windows user; please
 report what you see.

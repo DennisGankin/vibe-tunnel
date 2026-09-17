@@ -434,12 +434,21 @@ prompt_resource() {  # prompt_resource KEY "label" "hint"
     local k=$1 label=$2 hint=$3 cur reply
     cur=$(effective_resource "$k")
     show_cursor
-    read -e -r -p "$(printf '%s%s%s [%s]  %s(Enter keeps, - resets to the profile): ' "$BOLD" "$label" "$RST" "${cur:-unset}" "$DIM$hint$RST")" reply || return
-    case "$reply" in
-        '') ;;
-        -)  eval "R_$k=" ;;
-        *)  eval "R_$k=\$reply" ;;
-    esac
+    local why
+    while :; do
+        read -e -r -p "$(printf '%s%s%s [%s]  %s(Enter keeps, - resets to the profile): ' "$BOLD" "$label" "$RST" "${cur:-unset}" "$DIM$hint$RST")" reply || return
+        case "$reply" in
+            '') return ;;
+            -)  eval "R_$k="; return ;;
+        esac
+        if why=$(validate_resource "$k" "$reply"); then eval "R_$k=\$reply"; return; fi
+        printf '  %s! %s%s\n' "$RED" "$why" "$RST"
+    done
+}
+# "VALUE *" for an override, "VALUE (profile)" for the profile's value.
+resource_row() {  # resource_row KEY
+    local k=$1 v; eval "v=\${R_$k:-}"
+    if [ -n "$v" ]; then printf '%s  *' "$v"; else printf '%s  (profile)' "$(effective_resource "$k")"; fi
 }
 
 change_resources() {
@@ -448,22 +457,22 @@ change_resources() {
         load_profiles
         items=(
             "Base profile:  ${PROFILE:-(none)}"
-            "Time:          $(effective_resource TIME)${R_TIME:+ *}"
-            "CPUs:          $(effective_resource CPUS)${R_CPUS:+ *}"
-            "Memory per CPU: $(effective_resource MEM)${R_MEM:+ *}"
-            "GPUs:          $(effective_resource GPUS)${R_GPUS:+ *}"
-            "Partition:     $(effective_resource PARTITION)${R_PARTITION:+ *}"
-            "Account:       $(effective_resource ACCOUNT)${R_ACCOUNT:+ *}"
+            "Time:          $(resource_row TIME)"
+            "CPUs:          $(resource_row CPUS)"
+            "Memory per CPU: $(resource_row MEM)"
+            "GPUs:          $(resource_row GPUS)"
+            "Partition:     $(resource_row PARTITION)"
+            "Account:       $(resource_row ACCOUNT)"
             "Reset all overrides to the profile's values"
             "Edit the profile file (${PROFILE:-none}) in \$EDITOR"
             "Back"
         )
-        menu_select "Resources (* = overridden; saved with the config, passed to sbatch as flags):" "${items[@]}"
+        menu_select "Resources: (profile) = the preset's value, * = your override (saved with the config, passed to sbatch):" "${items[@]}"
         case "${MENU_CHOICE}" in
             0) change_profile ;;
             1) prompt_resource TIME "Time limit" "d-hh:mm:ss, e.g. 04:00:00 or 2-00:00:00" ;;
             2) prompt_resource CPUS "CPUs" "e.g. 16" ;;
-            3) prompt_resource MEM "Memory per CPU" "e.g. 2G or 4000M" ;;
+            3) prompt_resource MEM "Memory per CPU" "with unit: 2G, 4000M (a bare number = MB!)" ;;
             4) prompt_resource GPUS "GPUs" "e.g. a100:1, rtx_4090:4" ;;
             5) prompt_resource PARTITION "Partition" "sinfo lists them" ;;
             6) prompt_resource ACCOUNT "Account" "e.g. es_biol" ;;

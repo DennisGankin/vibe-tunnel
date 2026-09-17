@@ -133,6 +133,11 @@ parse_sandbox_opts() {
         esac
         shift
     done
+    local k v why
+    for k in MEM CPUS TIME; do
+        eval "v=\${R_$k:-}"
+        [ -z "$v" ] || why=$(validate_resource "$k" "$v") || die "--$(printf '%s' "$k" | tr '[:upper:]' '[:lower:]') $v: $why"
+    done
     if [ -n "$OPT_CONFIG" ]; then
         OPT_CF=$(find_config "$OPT_CONFIG") || die "config not found: $OPT_CONFIG (see: vibe-tunnel configs)"
         config_is_valid "$OPT_CF" || die "config has unexpected content, refusing to use it: $OPT_CF"
@@ -189,6 +194,14 @@ cmd_submit() {
         eval "v=\${R_$k:-}"
         [ -z "$v" ] || sbatch_res+=("$(resource_flag "$k")=$v")
     done
+    # The first launch into a fresh sandbox home installs Claude (~1 GB peak); a
+    # tiny request fails then and works ever after, which is confusing. Warn.
+    local mem_mb cpus total_mb
+    mem_mb=$(mem_to_mb "$(effective_value "$profile_path" MEM)"); cpus=$(effective_value "$profile_path" CPUS)
+    if [ -n "$mem_mb" ] && [[ "${cpus:-1}" =~ ^[0-9]+$ ]]; then
+        total_mb=$((mem_mb * ${cpus:-1}))
+        [ "$total_mb" -ge 1024 ] || warn "only ${total_mb} MB of memory in total (mem/cpu $(effective_value "$profile_path" MEM) x ${cpus:-1} cpus); the first launch into a fresh sandbox home needs about 1 GB for the Claude install"
+    fi
     [ -x "$VT_CODE_CLI" ] || die "VS Code CLI missing: $VT_CODE_CLI (run ./setup.sh)"
 
     local tunnel_name= job_name=$JOB_PREFIX
@@ -335,14 +348,20 @@ cmd_stop() {
 cmd_wait() {
     local id=${1:-}; [ -n "$id" ] || die "wait needs a JOBID"
     local poll=${VT_POLL_SECONDS:-5} log=$VT_LOG_DIR/$id.log
-    local row state node last_state= seen_codes=" " dev url code link tunnel
+    local row state node last_state= seen_codes=" " dev url code link tunnel misses=0
+    # A job is only over when slurm says so with a terminal state. squeue/sacct
+    # time out now and then on a busy controller; that is not a dead job.
+    local max_misses=$(( 120 / poll )); [ "$max_misses" -ge 6 ] || max_misses=6
     while :; do
         row=$(squeue_jobs | awk -F'|' -v id="$id" '$1 == id')
         if [ -n "$row" ]; then
-            IFS='|' read -r _ _ state node _ _ <<< "$row"
+            IFS='|' read -r _ _ state node _ _ <<< "$row"; misses=0
         else
-            state=$(sacct -j "$id" -n -X -o State 2>/dev/null | head -n1 | tr -d ' ' || true)
-            state=${state:-UNKNOWN}
+            state=$(sacct -j "$id" -n -X -o State 2>/dev/null | head -n1 | awk '{print $1}' || true)
+            case "$state" in
+                COMPLETED|FAILED|CANCELLED*|TIMEOUT|OUT_OF_MEMORY|NODE_FAIL|PREEMPTED|BOOT_FAIL|DEADLINE|REVOKED) ;;
+                *) misses=$((misses + 1)); state="UNKNOWN (slurm not answering, retry $misses/$max_misses)" ;;
+            esac
         fi
         if [ "$state" != "$last_state" ]; then
             printf '  %s[%s]%s job %s: %s%s\n' "$DIM" "$(date '+%H:%M:%S')" "$RST" "$id" "$state" "${node:+ on $node}"
@@ -368,11 +387,15 @@ cmd_wait() {
             return 0
         fi
         case "$state" in
-            PENDING|CONFIGURING|RUNNING|COMPLETING|REQUEUED|SUSPENDED) ;;
-            *)
+            COMPLETED|FAILED|CANCELLED*|TIMEOUT|OUT_OF_MEMORY|NODE_FAIL|PREEMPTED|BOOT_FAIL|DEADLINE|REVOKED)
                 printf '\n  %sjob %s ended (%s) before the tunnel came up.%s Last log lines:\n' "$RED" "$id" "$state" "$RST"
                 [ -f "$log" ] && tail -n 20 "$log" | sed 's/^/    /'
                 return 1 ;;
+            UNKNOWN*)
+                if [ "$misses" -ge "$max_misses" ]; then
+                    printf '\n  %sslurm has not answered for %ss; giving up waiting. The job may well be fine:%s  vibe-tunnel status\n' "$YELLOW" $((misses * poll)) "$RST"
+                    return 2
+                fi ;;
         esac
         sleep "$poll"
     done
