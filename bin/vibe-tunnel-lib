@@ -235,13 +235,15 @@ vt_container_args() {
     VT_VSCODE_AUTH=${VT_VSCODE_AUTH:-$VT_STATE_DIR/vscode-auth}
     mkdir -p "$VT_VSCODE_AUTH" 2>/dev/null && chmod 700 "$VT_VSCODE_AUTH" 2>/dev/null || true
     [ -d "$VT_VSCODE_AUTH" ] && CONTAINER_ARGS+=(--bind "$VT_VSCODE_AUTH:/opt/vibe-tunnel/vscode-auth")
-    local b
-    for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do CONTAINER_ARGS+=(--bind "$b"); done
+    # Apptainer bind syntax is SRC[:DEST[:OPTS]]; options need all three fields,
+    # so a bare SRC must become SRC:SRC:ro (SRC:ro would mean "mount at ./ro").
+    local b spec
+    for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do CONTAINER_ARGS+=(--bind "${b%:rw}"); done
     for b in "${RO_BINDS[@]+"${RO_BINDS[@]}"}"; do
-        case "$b" in
-            *:ro) CONTAINER_ARGS+=(--bind "$b") ;;
-            *:rw) CONTAINER_ARGS+=(--bind "${b%:rw}:ro") ;;
-            *)    CONTAINER_ARGS+=(--bind "$b:ro") ;;
+        spec=${b%:ro}; spec=${spec%:rw}
+        case "$spec" in
+            *:*) CONTAINER_ARGS+=(--bind "$spec:ro") ;;      # SRC:DEST
+            *)   CONTAINER_ARGS+=(--bind "$spec:$spec:ro") ;; # SRC -> same path
         esac
     done
 }
