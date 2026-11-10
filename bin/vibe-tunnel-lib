@@ -34,6 +34,7 @@ if [ ! -e "$VT_IMAGE" ]; then
 fi
 VT_SHELLRC=${VT_SHELLRC:-$VIBE_TUNNEL_DIR/bin/vibe-tunnel-shellrc}
 VT_ENTRY=$VIBE_TUNNEL_DIR/bin/vibe-tunnel-entry
+VT_CODETUNNEL=$VIBE_TUNNEL_DIR/bin/vibe-tunnel-codetunnel
 
 # Default sandbox home: per user, under the state dir (a shared repo clone must
 # not share one home). Keeps euler-vibe's when that is the image in use, so
@@ -210,6 +211,14 @@ vt_resolve_sandbox() {
     RO_BINDS+=("${VT_RO_BINDS[@]+"${VT_RO_BINDS[@]}"}")
 }
 
+# The VS Code tunnel login belongs to the user, not to a sandbox home or a mode:
+# it lives in the (private) state dir, is mounted into every container and used
+# directly by node-mode tunnels, so the GitHub device login happens once per user.
+vt_vscode_auth_dir() {
+    VT_VSCODE_AUTH=${VT_VSCODE_AUTH:-$VT_STATE_DIR/vscode-auth}
+    mkdir -p "$VT_VSCODE_AUTH" 2>/dev/null && chmod 700 "$VT_VSCODE_AUTH" 2>/dev/null || true
+}
+
 # --- container invocation (mirrors euler-vibe/bin/claude-mobile) -------------------
 # Fills CONTAINER_ARGS for `singularity exec`. Needs WORKSPACE, CLAUDE_MOBILE_HOME,
 # RW_BINDS, RO_BINDS and VT_TMPDIR. Extra --bind/--env can be appended by the caller.
@@ -229,11 +238,8 @@ vt_container_args() {
         --bind "$VT_SHELLRC:/opt/vibe-tunnel/shellrc:ro"
     )
     [ -x "$VT_CODE_CLI" ] && CONTAINER_ARGS+=(--bind "$VT_CODE_CLI:/opt/vibe-tunnel/code:ro")
-    # The VS Code tunnel login belongs to the user, not to a sandbox home: keep it
-    # in the (private) state dir and mount it into every container, so the GitHub
-    # device login happens once per user rather than once per home.
-    VT_VSCODE_AUTH=${VT_VSCODE_AUTH:-$VT_STATE_DIR/vscode-auth}
-    mkdir -p "$VT_VSCODE_AUTH" 2>/dev/null && chmod 700 "$VT_VSCODE_AUTH" 2>/dev/null || true
+    [ -f "$VT_CODETUNNEL" ] && CONTAINER_ARGS+=(--bind "$VT_CODETUNNEL:/opt/vibe-tunnel/codetunnel:ro")
+    vt_vscode_auth_dir
     [ -d "$VT_VSCODE_AUTH" ] && CONTAINER_ARGS+=(--bind "$VT_VSCODE_AUTH:/opt/vibe-tunnel/vscode-auth")
     # Apptainer bind syntax is SRC[:DEST[:OPTS]]; options need all three fields,
     # so a bare SRC must become SRC:SRC:ro (SRC:ro would mean "mount at ./ro").

@@ -28,7 +28,8 @@ The **vibe-tunnel** view in the activity bar lists your **running tunnels** (cli
 from the inline buttons) and your **saved configs** (click to launch; edit, delete, or run Claude / a shell in
 that sandbox from the context menu). **New tunnel…** starts from a saved config or from scratch and walks
 through workspace (with a remote directory browser), sandbox home, extra read-only / read-write directories,
-mode, resources (profile plus per-field overrides) and label, then saves and/or launches.
+mode, resources (profile plus per-field overrides) and label, then saves and/or launches. Mode *node* starts VS
+Code on the compute node itself, without the container; run `vibe-tunnel claude` in a terminal there for the sandbox.
 
 While a job starts, a progress notification follows it; if the VS Code tunnel needs its one-time GitHub login,
 the code is copied to your clipboard and a button opens GitHub. When the tunnel is up, a new VS Code window

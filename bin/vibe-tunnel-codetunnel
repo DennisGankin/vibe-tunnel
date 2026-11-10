@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# vibe-tunnel-codetunnel -------------------------------------------------------
+# Runs `code tunnel` and looks after everything around it: a writable copy of
+# the CLI, a per-job CLI data dir, the shared login token, optional extension
+# preinstall, and unregistering the tunnel on shutdown. One implementation for
+# both places a tunnel can run:
+#   - inside the container (called by bin/vibe-tunnel-entry, mode tunnel)
+#   - directly on the compute node (called by bin/vibe-tunnel-job, mode node)
+#
+# Input (environment):
+#   CT_CODE_SRC         the VS Code CLI binary to copy from
+#   CT_WORK             writable dir for the working copy (so the CLI can self-update)
+#   CT_CLI_ROOT         where per-job CLI data dirs live (<root>/jobs/<job>)
+#   CT_TOKEN_STORE      dir holding the shared login token (optional; else CT_CLI_ROOT)
+#   CT_SERVER_DATA_DIR  server data dir (optional; unset = the CLI's default, ~/.vscode-server)
+#   CT_NAME             tunnel name          CT_WORKSPACE  directory VS Code opens
+#   CT_EXTENSIONS       comma-separated extension ids to preinstall (optional)
+#   CT_JOB_ID           job id (default: pid)  CT_NODE  node name, for the log
+
+log() { printf '[%s] vibe-tunnel: %s\n' "$(date '+%H:%M:%S')" "$*"; }
+: "${CT_CODE_SRC:?}" "${CT_WORK:?}" "${CT_CLI_ROOT:?}" "${CT_NAME:?}" "${CT_WORKSPACE:?}"
+JOB=${CT_JOB_ID:-$$}
+
+# --- VS Code CLI ---------------------------------------------------------------
+# Work from a writable per-job copy so the CLI's own self-update can succeed
+# instead of failing on a read-only source.
+mkdir -p "$CT_WORK"
+CODE=$CT_WORK/code
+install -m 755 "$CT_CODE_SRC" "$CODE" || { log "ERROR: cannot copy the VS Code CLI"; exit 1; }
+log "vscode cli: $("$CODE" --version 2>/dev/null | head -n1)"
+
+# Per-job CLI data dir (the tunnel holds a singleton lock there, so concurrent
+# tunnels need their own), but a shared login token so the GitHub device login
+# is only needed once. VSCODE_CLI_USE_FILE_KEYCHAIN makes the CLI store the
+# token as a file in the data dir instead of trying a system keyring.
+export VSCODE_CLI_USE_FILE_KEYCHAIN=1
+CLI_DATA_DIR=$CT_CLI_ROOT/jobs/$JOB
+mkdir -p "$CLI_DATA_DIR"
+if [ -n "${CT_TOKEN_STORE:-}" ] && [ -d "$CT_TOKEN_STORE" ] && [ -w "$CT_TOKEN_STORE" ]; then
+    SHARED_TOKEN=$CT_TOKEN_STORE/token.json
+    # migrate a login saved next to the data dirs by earlier versions
+    [ -f "$SHARED_TOKEN" ] || { [ -f "$CT_CLI_ROOT/token.json" ] && cp -f "$CT_CLI_ROOT/token.json" "$SHARED_TOKEN" && chmod 600 "$SHARED_TOKEN" && log "moved the VS Code login to the per-user store"; }
+else
+    SHARED_TOKEN=$CT_CLI_ROOT/token.json
+fi
+[ -f "$SHARED_TOKEN" ] && cp -f "$SHARED_TOKEN" "$CLI_DATA_DIR/token.json" && log "reusing saved VS Code login"
+
+sync_token() {  # persist a fresh login for the next job
+    if [ -f "$CLI_DATA_DIR/token.json" ] && ! cmp -s "$CLI_DATA_DIR/token.json" "$SHARED_TOKEN" 2>/dev/null; then
+        cp -f "$CLI_DATA_DIR/token.json" "$SHARED_TOKEN" && chmod 600 "$SHARED_TOKEN" && log "saved VS Code login for future jobs"
+    fi
+}
+
+# Drop old per-job dirs (keep this job's) so they do not pile up.
+find "$CT_CLI_ROOT/jobs" -mindepth 1 -maxdepth 1 -type d ! -name "$JOB" -mtime +7 -exec rm -rf {} + 2>/dev/null || true
+
+# --- tunnel flags ------------------------------------------------------------------
+TUNNEL_ARGS=(tunnel --accept-server-license-terms --name "$CT_NAME" --cli-data-dir "$CLI_DATA_DIR")
+if [ -n "${CT_SERVER_DATA_DIR:-}" ]; then
+    mkdir -p "$CT_SERVER_DATA_DIR"
+    TUNNEL_ARGS+=(--server-data-dir "$CT_SERVER_DATA_DIR")
+    # Extensions that make no sense inside the container but arrive via Settings
+    # Sync (Dev Containers tries to install a second server and blocks the first
+    # connection) are pinned to the local side through the server's machine settings.
+    MACHINE_SETTINGS=$CT_SERVER_DATA_DIR/data/Machine/settings.json
+    PIN='{"remote.extensionKind": {"ms-vscode-remote.remote-containers": ["ui"], "ms-vscode-remote.remote-wsl": ["ui"], "ms-vscode-remote.remote-ssh": ["ui"]}}'
+    mkdir -p "$(dirname "$MACHINE_SETTINGS")"
+    if [ ! -s "$MACHINE_SETTINGS" ]; then
+        printf '%s\n' "$PIN" > "$MACHINE_SETTINGS" && log "wrote machine settings (Dev Containers pinned to the local side)"
+    elif ! grep -q 'remote.extensionKind' "$MACHINE_SETTINGS"; then
+        if command -v jq >/dev/null 2>&1 && jq -s '.[0] * .[1]' "$MACHINE_SETTINGS" <(printf '%s' "$PIN") > "$MACHINE_SETTINGS.new" 2>/dev/null; then
+            mv "$MACHINE_SETTINGS.new" "$MACHINE_SETTINGS" && log "added remote.extensionKind to machine settings"
+        else
+            log "note: add remote.extensionKind for ms-vscode-remote.remote-containers to $MACHINE_SETTINGS to keep Dev Containers out of the tunnel"
+        fi
+    fi
+fi
+# Pre-install extensions on the server if this CLI version supports it;
+# otherwise install them from the VS Code UI once.
+if [ -n "${CT_EXTENSIONS:-}" ]; then
+    if "$CODE" tunnel --help 2>&1 | grep -q -- '--install-extension'; then
+        IFS=',' read -ra exts <<< "$CT_EXTENSIONS"
+        for e in "${exts[@]}"; do [ -n "$e" ] && TUNNEL_ARGS+=(--install-extension "$e"); done
+    else
+        log "this VS Code CLI has no --install-extension; install '$CT_EXTENSIONS' from the Extensions view"
+    fi
+fi
+
+# --- run ------------------------------------------------------------------------------
+cd "$CT_WORKSPACE" 2>/dev/null || log "cannot cd to $CT_WORKSPACE; staying in $(pwd)"
+echo "------------------------------------------------------------"
+echo "workspace  : $CT_WORKSPACE on ${CT_NODE:-?}"
+echo "tunnel     : $CT_NAME"
+echo "desktop    : code --folder-uri 'vscode-remote://tunnel+$CT_NAME$CT_WORKSPACE'"
+echo "browser    : https://vscode.dev/tunnel/$CT_NAME$CT_WORKSPACE"
+echo "------------------------------------------------------------"
+
+tunnel_pid= terminated=0
+cleanup() {
+    trap - TERM INT EXIT
+    terminated=1
+    sync_token
+    if [ -n "$tunnel_pid" ] && kill -0 "$tunnel_pid" 2>/dev/null; then
+        log "stopping tunnel"
+        kill -TERM "$tunnel_pid" 2>/dev/null; wait "$tunnel_pid" 2>/dev/null
+    fi
+    # Free the name for the next job (accounts are limited to a handful of tunnels).
+    timeout 30 "$CODE" tunnel --cli-data-dir "$CLI_DATA_DIR" unregister >/dev/null 2>&1 \
+        && log "tunnel '$CT_NAME' unregistered" || log "tunnel unregister skipped/failed"
+}
+trap cleanup TERM INT EXIT
+
+# `code tunnel` prints either a device-login prompt (first time per user) or the
+# tunnel link once it is up; `vibe-tunnel wait` watches the job log for both.
+"$CODE" "${TUNNEL_ARGS[@]}" &
+tunnel_pid=$!
+
+# Persist the token as soon as the first login completes, then periodically.
+( while kill -0 "$tunnel_pid" 2>/dev/null; do sleep 30; sync_token; done ) &
+sync_pid=$!
+
+wait "$tunnel_pid"; status=$?
+{ kill "$sync_pid" 2>/dev/null && wait "$sync_pid"; } 2>/dev/null || true
+log "code tunnel exited with status $status"
+# A shutdown we were asked for (scancel, time limit) is a clean end of the job.
+[ "$terminated" -eq 1 ] && exit 0
+exit "$status"

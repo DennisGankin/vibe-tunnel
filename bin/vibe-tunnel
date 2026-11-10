@@ -12,6 +12,8 @@ set -euo pipefail
 #                              [--rw DIR[:DEST]]... [--ro DIR[:DEST]]...
 #                              [--time T] [--cpus N] [--mem M] [--gpus G] [--partition P] [--account A]
 #                              [--extensions ID,ID] [--json]
+#                              [--no-container]   VS Code directly on the node (no sandbox); start the
+#                                                 container later from a terminal there: vibe-tunnel claude
 #   vibe-tunnel claude [sandbox opts] [--srun [PROFILE]] [-- CLAUDE_ARGS]   Claude Code in the container
 #   vibe-tunnel shell  [sandbox opts] [--srun [PROFILE]]                    a shell in the container
 #                                       (right here, or with --srun inside an interactive slurm job)
@@ -21,7 +23,7 @@ set -euo pipefail
 #   vibe-tunnel logs JOBID [-f]           tail the job log
 #   vibe-tunnel stop JOBID|LABEL          scancel
 #   vibe-tunnel configs [--porcelain]     saved sandbox configs (own + claude-launch's)
-#   vibe-tunnel config show NAME [--porcelain] | save NAME [--profile P] [--mode M] [sandbox opts]
+#   vibe-tunnel config show NAME [--porcelain] | save NAME [--profile P] [--mode tunnel|node|..] [sandbox opts]
 #                                       | delete NAME        (used by the VS Code extension)
 #   vibe-tunnel ls [DIR] [--porcelain]    subdirectories of DIR (remote directory browser)
 #   vibe-tunnel profiles [--porcelain]    available sbatch resource profiles (presets)
@@ -58,7 +60,7 @@ ok()   { printf '  %s✓%s %s\n' "$GREEN" "$RST" "$*"; }
 warn() { printf '  %s!%s %s\n' "$YELLOW" "$RST" "$*"; }
 die()  { printf '%svibe-tunnel: %s%s\n' "$RED" "$*" "$RST" >&2; exit 1; }
 
-usage() { sed -n '4,35p' "$VT_BIN" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '4,37p' "$VT_BIN" | sed 's/^# \{0,1\}//'; }
 
 # --- helpers ---------------------------------------------------------------
 
@@ -101,6 +103,7 @@ squeue_jobs() {
 # CLI <= 1.12x: "Open this link in your browser URL"; CLI >= 1.13x: "  ➜  Open:  URL"
 log_link()   { { grep -Eo '(Open this link in your browser|Open:)[[:space:]]+https?://[^[:space:]]+' "$1" 2>/dev/null | tail -n1 | awk '{print $NF}'; } || true; }
 log_tunnel() { { grep -Eo '^VT_TUNNEL_NAME=.*' "$1" 2>/dev/null | tail -n1 | cut -d= -f2; } || true; }
+log_mode()   { { grep -Eo '^VT_MODE=.*' "$1" 2>/dev/null | tail -n1 | cut -d= -f2; } || true; }
 log_workspace() { { grep -Eo '^VT_WORKSPACE=.*' "$1" 2>/dev/null | tail -n1 | cut -d= -f2-; } || true; }
 log_device() { { grep -Eo 'log into[[:space:]]+https?://[^[:space:]]+[[:space:]]+and use code[[:space:]]+[A-Za-z0-9-]+' "$1" 2>/dev/null | tail -n1 | awk '{print $3 " " $NF}'; } || true; }
 
@@ -108,10 +111,14 @@ log_device() { { grep -Eo 'log into[[:space:]]+https?://[^[:space:]]+[[:space:]]
 OPT_PROFILE= OPT_LABEL= OPT_CONFIG= OPT_WORKSPACE= OPT_HOME= OPT_JSON=0 OPT_CF=
 OPT_EXTENSIONS=${VT_EXTENSIONS-anthropic.claude-code}
 OPT_RW=() OPT_RO=() OPT_REST=()
+OPT_NODE=            # 1 = --no-container, 0 = --container, empty = not said (a config's MODE decides)
+OPT_EXTENSIONS_SET=0
 R_TIME= R_CPUS= R_MEM= R_GPUS= R_PARTITION= R_ACCOUNT=
 parse_sandbox_opts() {
     while [ $# -gt 0 ]; do
         case "$1" in
+            --no-container|--node) OPT_NODE=1 ;;
+            --container)  OPT_NODE=0 ;;
             --time)       R_TIME=$2; shift ;;
             --cpus)       R_CPUS=$2; shift ;;
             --mem)        R_MEM=$2; shift ;;
@@ -124,7 +131,7 @@ parse_sandbox_opts() {
             --home)       OPT_HOME=$2; shift ;;
             --rw)         OPT_RW+=("$2"); shift ;;
             --ro)         OPT_RO+=("$2"); shift ;;
-            --extensions) OPT_EXTENSIONS=$2; shift ;;
+            --extensions) OPT_EXTENSIONS=$2; OPT_EXTENSIONS_SET=1; shift ;;
             --json)       OPT_JSON=1 ;;
             --)           shift; OPT_REST=("$@"); break ;;
             -h|--help)    usage; exit 0 ;;
@@ -147,8 +154,8 @@ parse_sandbox_opts() {
         OPT_WORKSPACE=$(realpath -- "$OPT_WORKSPACE")
     fi
     [ -z "$OPT_HOME" ] || OPT_HOME=$(abspath "$OPT_HOME")
-    [ -e "$VT_IMAGE" ] || die "container image missing: $VT_IMAGE (run ./setup.sh to build it)"
 }
+require_image() { [ -e "$VT_IMAGE" ] || die "container image missing: $VT_IMAGE (run ./setup.sh to build it)"; }
 
 # Per-run settings file for bin/vibe-tunnel-job. Prints its path.
 write_env_file() {
@@ -188,6 +195,18 @@ cmd_submit() {
     [ -n "$profile" ] || die "submit needs a PROFILE (see: vibe-tunnel profiles)"
     local profile_path
     profile_path=$(resolve_profile "$profile") || die "profile not found: $profile"
+    # Container tunnel (default) or VS Code directly on the node: the flag decides,
+    # else a config saved in node mode stays a node tunnel.
+    local mode=tunnel
+    if [ "$OPT_NODE" = 1 ]; then mode=node
+    elif [ -z "$OPT_NODE" ] && [ -n "$OPT_CF" ] && [ "$(config_field "$OPT_CF" MODE)" = node ]; then mode=node; fi
+    if [ "$mode" = node ]; then
+        # On the bare node the Claude Code extension would run unsandboxed, so it is
+        # not preinstalled there unless asked for with --extensions.
+        [ "$OPT_EXTENSIONS_SET" -eq 1 ] || OPT_EXTENSIONS=
+    else
+        require_image
+    fi
     # Resource overrides go to sbatch as flags, which beat the profile's #SBATCH lines.
     local sbatch_res=()
     for k in "${RESOURCE_KEYS[@]}"; do
@@ -223,7 +242,7 @@ cmd_submit() {
     out=$(sbatch --parsable \
         --job-name="$job_name" \
         --output="$VT_LOG_DIR/%j.log" \
-        --export="ALL,VIBE_TUNNEL_DIR=$VIBE_TUNNEL_DIR,VT_ENV_FILE=$env_file,VT_STATE_DIR=$VT_STATE_DIR,VT_MODE=tunnel" \
+        --export="ALL,VIBE_TUNNEL_DIR=$VIBE_TUNNEL_DIR,VT_ENV_FILE=$env_file,VT_STATE_DIR=$VT_STATE_DIR,VT_MODE=$mode" \
         "${sbatch_res[@]+"${sbatch_res[@]}"}" \
         "$profile_path") || die "sbatch failed"
     job_id=${out%%;*}
@@ -231,10 +250,11 @@ cmd_submit() {
     printf '%s %s %s %s\n' "$job_id" "$job_name" "$tunnel_name" "$(date +%s)-$$" > "$VT_STATE_DIR/last-job"
 
     if [ "$OPT_JSON" -eq 1 ]; then
-        printf '{"job_id":"%s","job_name":"%s","tunnel_name":"%s","log":"%s","profile":"%s","config":"%s","resources":"%s"}\n' \
-            "$job_id" "$job_name" "$tunnel_name" "$VT_LOG_DIR/$job_id.log" "$profile_path" "$OPT_CONFIG" "$(resources_summary "$profile_path")"
+        printf '{"job_id":"%s","job_name":"%s","tunnel_name":"%s","log":"%s","profile":"%s","config":"%s","resources":"%s","mode":"%s"}\n' \
+            "$job_id" "$job_name" "$tunnel_name" "$VT_LOG_DIR/$job_id.log" "$profile_path" "$OPT_CONFIG" "$(resources_summary "$profile_path")" "$mode"
     else
         printf 'Submitted job %s%s%s (%s)\n' "$BOLD" "$job_id" "$RST" "$job_name"
+        [ "$mode" != node ] || printf '  mode    : node (VS Code on the node, no container; sandbox via `vibe-tunnel claude` in a terminal there)\n'
         printf '  profile : %s\n' "$profile_path"
         printf '  resources: %s\n' "$(resources_summary "$profile_path")"
         [ -z "$OPT_CONFIG" ]    || printf '  config  : %s\n' "$OPT_CONFIG"
@@ -271,8 +291,21 @@ cmd_run() {
         # drop --srun (and its profile) from the args the inner invocation sees
         exec srun --job-name="vibe-tunnel-$mode" "${flags[@]+"${flags[@]}"}" --pty "$VT_BIN" "$mode" "${pass[@]+"${pass[@]}"}"
     fi
+    require_image
     local env_file
-    env_file=$(write_env_file "")
+    if [ -z "$OPT_CONFIG$OPT_WORKSPACE$OPT_HOME" ] && [ ${#OPT_RW[@]} -eq 0 ] && [ ${#OPT_RO[@]} -eq 0 ]; then
+        if [ -n "${VT_NODE_ENV_FILE:-}" ] && [ -f "$VT_NODE_ENV_FILE" ] && env_is_valid "$VT_NODE_ENV_FILE"; then
+            # In a terminal of a node-mode tunnel: the sandbox chosen when that job was launched.
+            env_file=$VT_NODE_ENV_FILE
+            printf '%susing the sandbox settings of this node job; pass --config/--workspace/... to choose another%s\n' "$DIM" "$RST" >&2
+        else
+            # Nothing said: the current directory is the workspace (never the whole home by accident).
+            OPT_WORKSPACE=$(pwd -P)
+            env_file=$(write_env_file "")
+        fi
+    else
+        env_file=$(write_env_file "")
+    fi
     [ -n "${SLURM_JOB_ID:-}" ] || warn "not inside a slurm job: this runs on $(hostname -s). Add --srun [PROFILE] to run it in an interactive job."
     VT_ENV_FILE=$env_file VT_MODE=$mode exec "$VIBE_TUNNEL_DIR/bin/vibe-tunnel-job" "${OPT_REST[@]+"${OPT_REST[@]}"}"
 }
@@ -295,7 +328,7 @@ cmd_status() {
         if [ "$porcelain" -eq 1 ]; then
             printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$name" "$state" "$node" "$elapsed" "$left" "$tunnel" "$link" "$ws"
         else
-            printf '%-10s %-28s %-9s %-10s %-9s %-9s %s\n' "$id" "$name" "$state" "${node:--}" "$elapsed" "$left" "${tunnel:--}"
+            printf '%-10s %-28s %-9s %-10s %-9s %-9s %s%s\n' "$id" "$name" "$state" "${node:--}" "$elapsed" "$left" "${tunnel:--}" "$([ "$(log_mode "$log")" = node ] && printf '  (node, no container)')"
             [ -z "$link" ] || printf '           %s%s%s\n' "$DIM" "$link" "$RST"
         fi
     done <<< "$rows"
@@ -539,7 +572,7 @@ config_save() {
             *)         rest+=("$1") ;;
         esac; shift
     done
-    case "$mode" in tunnel|claude|shell) ;; *) die "mode must be tunnel, claude or shell" ;; esac
+    case "$mode" in tunnel|node|claude|shell) ;; *) die "mode must be tunnel, node, claude or shell" ;; esac
     parse_sandbox_opts "${rest[@]+"${rest[@]}"}"
     [ -z "$OPT_PROFILE" ] || profile=$OPT_PROFILE
     [ -z "$profile" ] || resolve_profile "$profile" >/dev/null || die "profile not found: $profile"
