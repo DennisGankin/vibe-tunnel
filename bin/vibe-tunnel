@@ -18,7 +18,7 @@ set -euo pipefail
 #   vibe-tunnel shell  [sandbox opts] [--srun [PROFILE]]                    a shell in the container
 #                                       (right here, or with --srun inside an interactive slurm job)
 #   vibe-tunnel wait JOBID                block until the tunnel link appears, print it
-#   vibe-tunnel status [--porcelain]      running tunnels + their links
+#   vibe-tunnel status [--porcelain[=2]]  running tunnels + their links (=2 adds the mode: tunnel | node)
 #   vibe-tunnel show JOBID                state, node and the full log (machine-readable)
 #   vibe-tunnel logs JOBID [-f]           tail the job log
 #   vibe-tunnel stop JOBID|LABEL          scancel
@@ -104,6 +104,12 @@ squeue_jobs() {
 log_link()   { { grep -Eo '(Open this link in your browser|Open:)[[:space:]]+https?://[^[:space:]]+' "$1" 2>/dev/null | tail -n1 | awk '{print $NF}'; } || true; }
 log_tunnel() { { grep -Eo '^VT_TUNNEL_NAME=.*' "$1" 2>/dev/null | tail -n1 | cut -d= -f2; } || true; }
 log_mode()   { { grep -Eo '^VT_MODE=.*' "$1" 2>/dev/null | tail -n1 | cut -d= -f2; } || true; }
+# tunnel (container) or node, for a job id: recorded at submit, else from the log.
+job_mode() {
+    local m; m=$(cat "$VT_LOG_DIR/$1.mode" 2>/dev/null || true)
+    [ -n "$m" ] || m=$(log_mode "$VT_LOG_DIR/$1.log")
+    printf '%s' "$m"
+}
 log_workspace() { { grep -Eo '^VT_WORKSPACE=.*' "$1" 2>/dev/null | tail -n1 | cut -d= -f2-; } || true; }
 log_device() { { grep -Eo 'log into[[:space:]]+https?://[^[:space:]]+[[:space:]]+and use code[[:space:]]+[A-Za-z0-9-]+' "$1" 2>/dev/null | tail -n1 | awk '{print $3 " " $NF}'; } || true; }
 
@@ -248,6 +254,7 @@ cmd_submit() {
     job_id=${out%%;*}
     [ -n "$job_id" ] || die "could not read the job id from sbatch output: $out"
     printf '%s %s %s %s\n' "$job_id" "$job_name" "$tunnel_name" "$(date +%s)-$$" > "$VT_STATE_DIR/last-job"
+    printf '%s\n' "$mode" > "$VT_LOG_DIR/$job_id.mode"      # known before the job has written its log
 
     if [ "$OPT_JSON" -eq 1 ]; then
         printf '{"job_id":"%s","job_name":"%s","tunnel_name":"%s","log":"%s","profile":"%s","config":"%s","resources":"%s","mode":"%s"}\n' \
@@ -312,23 +319,27 @@ cmd_run() {
 
 # --- status / show / logs / stop -------------------------------------------
 cmd_status() {
+    # --porcelain: 9 fields, frozen (older laptop clients parse exactly these).
+    # --porcelain=2: the same plus a 10th field, the mode (tunnel = container, node).
     local porcelain=0
-    [ "${1:-}" = "--porcelain" ] && porcelain=1
+    case "${1:-}" in --porcelain) porcelain=1 ;; --porcelain=2) porcelain=2 ;; esac
     local rows
     rows=$(squeue_jobs || true)
     if [ -z "$rows" ]; then
-        [ "$porcelain" -eq 1 ] || echo "No vibe-tunnel jobs queued or running."
+        [ "$porcelain" -ge 1 ] || echo "No vibe-tunnel jobs queued or running."
         return 0
     fi
-    [ "$porcelain" -eq 1 ] || printf '%s%-10s %-28s %-9s %-10s %-9s %-9s %s%s\n' "$BOLD" JOBID NAME STATE NODE ELAPSED LEFT TUNNEL "$RST"
+    [ "$porcelain" -ge 1 ] || printf '%s%-10s %-28s %-9s %-10s %-9s %-9s %s%s\n' "$BOLD" JOBID NAME STATE NODE ELAPSED LEFT TUNNEL "$RST"
     local id name state node elapsed left log tunnel link ws
     while IFS='|' read -r id name state node elapsed left; do
         log=$VT_LOG_DIR/$id.log
         tunnel=$(log_tunnel "$log"); link=$(log_link "$log"); ws=$(log_workspace "$log")
-        if [ "$porcelain" -eq 1 ]; then
+        if [ "$porcelain" -eq 2 ]; then
+            printf '%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$name" "$state" "$node" "$elapsed" "$left" "$tunnel" "$link" "$ws" "$(job_mode "$id")"
+        elif [ "$porcelain" -eq 1 ]; then
             printf '%s|%s|%s|%s|%s|%s|%s|%s|%s\n' "$id" "$name" "$state" "$node" "$elapsed" "$left" "$tunnel" "$link" "$ws"
         else
-            printf '%-10s %-28s %-9s %-10s %-9s %-9s %s%s\n' "$id" "$name" "$state" "${node:--}" "$elapsed" "$left" "${tunnel:--}" "$([ "$(log_mode "$log")" = node ] && printf '  (node, no container)')"
+            printf '%-10s %-28s %-9s %-10s %-9s %-9s %s%s\n' "$id" "$name" "$state" "${node:--}" "$elapsed" "$left" "${tunnel:--}" "$([ "$(job_mode "$id")" = node ] && printf '  (node, no container)')"
             [ -z "$link" ] || printf '           %s%s%s\n' "$DIM" "$link" "$RST"
         fi
     done <<< "$rows"
@@ -455,10 +466,10 @@ cmd_configs() {
             fi
             ws=$(config_field "$f" WORKSPACE); hd=$(config_field "$f" CLAUDE_MOBILE_HOME)
             pr=$(config_field "$f" PROFILE);   lb=$(config_field "$f" LABEL)
-            if [ "$porcelain" -eq 1 ]; then printf '%s|%s|%s|%s|%s|%s\n' "$name" "$ws" "$hd" "$pr" "$lb" "$src"
+            if [ "$porcelain" -eq 1 ]; then printf '%s|%s|%s|%s|%s|%s|%s\n' "$name" "$ws" "$hd" "$pr" "$lb" "$src" "$(config_field "$f" MODE)"
             else
                 printf '  %s%-20s%s %s\n' "$BOLD" "$name" "$RST" "$ws"
-                printf '  %-20s %shome %s%s%s%s\n' "" "$DIM" "$hd" "${pr:+  profile $pr}" "${lb:+  label $lb}" "$RST"
+                printf '  %-20s %shome %s%s%s%s%s\n' "" "$DIM" "$hd" "${pr:+  profile $pr}" "${lb:+  label $lb}" "$([ "$(config_field "$f" MODE)" = node ] && printf '  node tunnel (no container)')" "$RST"
                 if [ -n "$pr" ] && pp=$(resolve_profile "$pr"); then
                     local k; for k in "${RESOURCE_KEYS[@]}"; do eval "R_$k=\$(config_field \"\$f\" $k)"; done
                     printf '  %-20s %s%s%s\n' "" "$DIM" "$(resources_summary "$pp")" "$RST"

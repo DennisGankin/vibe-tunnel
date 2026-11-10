@@ -188,12 +188,13 @@ Logs: `vibe-tunnel logs <jobid>` (cluster or laptop), `vibe-tunnel status`, `vib
 
 ## VS Code extension (optional GUI)
 
-The same thing as a sidebar inside VS Code: running tunnels (click to connect, stop, log), saved configs
-(click to launch, edit, delete, run Claude or a shell in that sandbox), and *New tunnel…* as a step-by-step
-setup with a remote directory browser. Install the `.vsix` from [vscode-extension/](vscode-extension/):
+The same thing as a sidebar inside VS Code: two start buttons, *New container tunnel…* (sandboxed) and *New node
+tunnel…* (VS Code on the node, no container), each a step-by-step setup with a remote directory browser; running
+tunnels marked by kind (click to connect, stop, log); saved configs (click to launch, or launch as the other
+kind, edit, delete, run Claude or a shell in that sandbox). Install the `.vsix` from [vscode-extension/](vscode-extension/):
 
 ```bash
-code --install-extension vscode-extension/vibe-tunnel-0.1.6.vsix
+code --install-extension vscode-extension/vibe-tunnel-0.1.7.vsix
 ```
 If you use VS Code **profiles**, install it into the profile you work in: `code --profile <name> --install-extension …`,
 or *Extensions → ··· → Install from VSIX…* inside that profile. Extensions are per profile.
