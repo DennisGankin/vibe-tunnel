@@ -97,8 +97,8 @@ header_lines() {
 RUN_IDS=() RUN_LABELS=() RUN_TUNNELS=()
 load_running() {
     RUN_IDS=() RUN_LABELS=() RUN_TUNNELS=()
-    local id name state node el left tunnel link
-    while IFS='|' read -r id name state node el left tunnel link; do
+    local id name state node el left tunnel link _
+    while IFS='|' read -r id name state node el left tunnel link _; do
         [ -n "$id" ] || continue
         RUN_IDS+=("$id"); RUN_TUNNELS+=("$tunnel")
         RUN_LABELS+=("$(printf '%-12s %-9s %-10s left %-9s job %s%s' "${tunnel:-(starting)}" "$state" "${node:--}" "$left" "$id" "$(grep -qs '^VT_MODE=node' "$VT_LOG_DIR/$id.log" && printf '  (node, no container)')")")
@@ -544,11 +544,11 @@ config_path() { printf '%s/%s.conf' "$VT_CONFIG_DIR" "$1"; }
 CONFIG_NAMES=() CONFIG_LABELS=()
 list_configs() {
     CONFIG_NAMES=() CONFIG_LABELS=()
-    local n ws hd pr lb src
-    while IFS='|' read -r n ws hd pr lb src; do
+    local n ws hd pr lb src md _
+    while IFS='|' read -r n ws hd pr lb src md _; do
         [ -n "$n" ] || continue
         CONFIG_NAMES+=("$n")
-        CONFIG_LABELS+=("$(printf '%-16s %s%s%s' "$n" "$(tilde "$ws")" "${pr:+  [$pr]}" "$([ "$src" = claude-launch ] && printf '  (claude-launch)')")")
+        CONFIG_LABELS+=("$(printf '%-16s %s%s%s%s' "$n" "$(tilde "$ws")" "${pr:+  [$pr]}" "$([ "$md" = node ] && printf '  (node)')" "$([ "$src" = claude-launch ] && printf '  (claude-launch)')")")
     done < <("$VT" configs --porcelain 2>/dev/null || true)
 }
 

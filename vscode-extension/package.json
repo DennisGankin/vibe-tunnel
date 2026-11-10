@@ -2,7 +2,7 @@
   "name": "vibe-tunnel",
   "displayName": "vibe-tunnel",
   "description": "VS Code + Claude Code inside a sandboxed container on the Euler cluster: start, reconnect and stop tunnels from the sidebar.",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "publisher": "dennisgankin",
   "license": "MIT",
   "repository": {
@@ -63,9 +63,27 @@
       },
       {
         "command": "vibeTunnel.newTunnel",
-        "title": "New tunnel\u2026",
+        "title": "New container tunnel\u2026 (sandboxed)",
         "category": "vibe-tunnel",
-        "icon": "$(add)"
+        "icon": "$(shield)"
+      },
+      {
+        "command": "vibeTunnel.newNodeTunnel",
+        "title": "New node tunnel\u2026 (VS Code on the node, no container)",
+        "category": "vibe-tunnel",
+        "icon": "$(server)"
+      },
+      {
+        "command": "vibeTunnel.launchConfigContainer",
+        "title": "Launch as container tunnel (sandboxed)",
+        "category": "vibe-tunnel",
+        "icon": "$(shield)"
+      },
+      {
+        "command": "vibeTunnel.launchConfigNode",
+        "title": "Launch as node tunnel (no container)",
+        "category": "vibe-tunnel",
+        "icon": "$(server)"
       },
       {
         "command": "vibeTunnel.connect",
@@ -140,14 +158,19 @@
           "group": "navigation@1"
         },
         {
-          "command": "vibeTunnel.refresh",
+          "command": "vibeTunnel.newNodeTunnel",
           "when": "view == vibeTunnel.view",
           "group": "navigation@2"
         },
         {
-          "command": "vibeTunnel.openMenu",
+          "command": "vibeTunnel.refresh",
           "when": "view == vibeTunnel.view",
           "group": "navigation@3"
+        },
+        {
+          "command": "vibeTunnel.openMenu",
+          "when": "view == vibeTunnel.view",
+          "group": "navigation@4"
         },
         {
           "command": "vibeTunnel.loginTerminal",
@@ -185,6 +208,16 @@
           "command": "vibeTunnel.editConfig",
           "when": "view == vibeTunnel.view && viewItem == config-own",
           "group": "inline@2"
+        },
+        {
+          "command": "vibeTunnel.launchConfigContainer",
+          "when": "view == vibeTunnel.view && viewItem =~ /config/",
+          "group": "0_launch@1"
+        },
+        {
+          "command": "vibeTunnel.launchConfigNode",
+          "when": "view == vibeTunnel.view && viewItem =~ /config/",
+          "group": "0_launch@2"
         },
         {
           "command": "vibeTunnel.claudeTerminal",
@@ -233,6 +266,14 @@
         },
         {
           "command": "vibeTunnel.shellTerminal",
+          "when": "false"
+        },
+        {
+          "command": "vibeTunnel.launchConfigContainer",
+          "when": "false"
+        },
+        {
+          "command": "vibeTunnel.launchConfigNode",
           "when": "false"
         }
       ]

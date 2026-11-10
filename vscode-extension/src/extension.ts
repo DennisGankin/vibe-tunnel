@@ -31,7 +31,10 @@ export function activate(context: vscode.ExtensionContext): void {
       if (e.affectsConfiguration('vibeTunnel')) { cluster = makeCluster(); tree.refresh(); schedule(); }
     }),
     vscode.commands.registerCommand('vibeTunnel.refresh', () => tree.refresh()),
-    vscode.commands.registerCommand('vibeTunnel.newTunnel', () => guard(newTunnel)),
+    vscode.commands.registerCommand('vibeTunnel.newTunnel', () => guard(() => newTunnel('tunnel'))),
+    vscode.commands.registerCommand('vibeTunnel.newNodeTunnel', () => guard(() => newTunnel('node'))),
+    vscode.commands.registerCommand('vibeTunnel.launchConfigContainer', (item?: ConfigItem) => guard(() => launchConfig(item, 'tunnel'))),
+    vscode.commands.registerCommand('vibeTunnel.launchConfigNode', (item?: ConfigItem) => guard(() => launchConfig(item, 'node'))),
     vscode.commands.registerCommand('vibeTunnel.connect', (item?: TunnelItem) => guard(() => connect(item))),
     vscode.commands.registerCommand('vibeTunnel.stop', (item?: TunnelItem) => guard(() => stop(item))),
     vscode.commands.registerCommand('vibeTunnel.logs', (item?: TunnelItem) => guard(() => logs(item))),
@@ -77,13 +80,37 @@ class GroupItem extends vscode.TreeItem {
     this.contextValue = 'group';
   }
 }
+/** The two kinds of tunnel, as shown everywhere in the UI. */
+type Kind = 'tunnel' | 'node';
+const KIND = {
+  tunnel: { name: 'container tunnel', short: 'container', icon: 'shield', blurb: 'VS Code inside the sandbox container' },
+  node:   { name: 'node tunnel',      short: 'node',      icon: 'server', blurb: 'VS Code on the compute node itself, no container' },
+} as const;
+function kindOf(mode: string): Kind | undefined { return mode === 'node' ? 'node' : mode === 'tunnel' ? 'tunnel' : undefined; }
+
+/** The two "start" rows at the top of the view. */
+class ActionItem extends vscode.TreeItem {
+  constructor(kind: Kind) {
+    super(`New ${KIND[kind].name}…`, vscode.TreeItemCollapsibleState.None);
+    this.description = kind === 'node' ? 'no sandbox; container later via vibe-tunnel claude' : 'sandboxed';
+    this.tooltip = kind === 'node'
+      ? 'A slurm job with VS Code on the compute node itself: your cluster home and extensions, nothing sandboxed. Start the container from a terminal there with `vibe-tunnel claude`.'
+      : 'A slurm job with VS Code inside the sandbox container: terminals and the Claude Code extension only see the directories you bind.';
+    this.iconPath = new vscode.ThemeIcon(kind === 'node' ? 'server' : 'shield');
+    this.contextValue = 'action';
+    this.command = { command: kind === 'node' ? 'vibeTunnel.newNodeTunnel' : 'vibeTunnel.newTunnel', title: this.label as string };
+  }
+}
 class TunnelItem extends vscode.TreeItem {
   constructor(public readonly tunnel: Tunnel) {
     super(tunnel.tunnel || '(starting…)', vscode.TreeItemCollapsibleState.None);
     const t = tunnel;
-    this.description = `${t.state.toLowerCase()}${t.node ? ' · ' + t.node : ''}${t.left ? ' · ' + t.left + ' left' : ''}`;
-    this.tooltip = `job ${t.jobId} (${t.jobName})\nworkspace: ${t.workspace || '?'}\n${t.link || 'tunnel not up yet'}`;
-    this.iconPath = new vscode.ThemeIcon(t.link ? 'plug' : 'loading~spin');
+    const kind = kindOf(t.mode);
+    const tag = kind === 'node' ? 'node · no sandbox · ' : kind === 'tunnel' ? 'container · ' : '';
+    this.description = `${tag}${t.state.toLowerCase()}${t.node ? ' · ' + t.node : ''}${t.left ? ' · ' + t.left + ' left' : ''}`;
+    this.tooltip = `${kind ? KIND[kind].name + ': ' + KIND[kind].blurb + '\n' : ''}job ${t.jobId} (${t.jobName})\nworkspace: ${t.workspace || '?'}\n${t.link || 'tunnel not up yet'}`
+      + (kind === 'node' ? '\nSandbox: run `vibe-tunnel claude` in a terminal of that window.' : '');
+    this.iconPath = new vscode.ThemeIcon(!t.link ? 'loading~spin' : kind ? KIND[kind].icon : 'plug');
     this.contextValue = t.link ? 'tunnel' : 'tunnel-pending';
     if (t.link) { this.command = { command: 'vibeTunnel.connect', title: 'Connect', arguments: [this] }; }
   }
@@ -91,14 +118,15 @@ class TunnelItem extends vscode.TreeItem {
 class ConfigItem extends vscode.TreeItem {
   constructor(public readonly config: ConfigSummary) {
     super(config.name, vscode.TreeItemCollapsibleState.None);
-    this.description = `${shorten(config.workspace)}${config.profile ? ' · ' + config.profile : ''}`;
-    this.tooltip = `workspace: ${config.workspace}\nhome: ${config.home}\nprofile: ${config.profile || '(none)'}\nlabel: ${config.label || config.name}\nsource: ${config.source}`;
+    const node = config.mode === 'node';
+    this.description = `${node ? 'node · ' : ''}${shorten(config.workspace)}${config.profile ? ' · ' + config.profile : ''}`;
+    this.tooltip = `click: launch as ${node ? 'node tunnel (no container)' : 'container tunnel'}; the other kind is in the context menu\nworkspace: ${config.workspace}\nhome: ${config.home}\nprofile: ${config.profile || '(none)'}\nlabel: ${config.label || config.name}\nsource: ${config.source}`;
     this.iconPath = new vscode.ThemeIcon(config.source === 'vibe-tunnel' ? 'file-code' : 'file-symlink-file');
     this.contextValue = config.source === 'vibe-tunnel' ? 'config-own' : 'config-other';
     this.command = { command: 'vibeTunnel.launchConfig', title: 'Launch', arguments: [this] };
   }
 }
-type Item = GroupItem | TunnelItem | ConfigItem;
+type Item = ActionItem | GroupItem | TunnelItem | ConfigItem;
 
 class TreeProvider implements vscode.TreeDataProvider<Item> {
   private readonly emitter = new vscode.EventEmitter<Item | undefined>();
@@ -112,7 +140,8 @@ class TreeProvider implements vscode.TreeDataProvider<Item> {
     if (!e) {
       this.loading ??= this.load();
       await this.loading;
-      return [new GroupItem('Running tunnels', 'tunnels', this.tunnels.length), new GroupItem('Saved configs', 'configs', this.configs.length)];
+      return [new ActionItem('tunnel'), new ActionItem('node'),
+        new GroupItem('Running tunnels', 'tunnels', this.tunnels.length), new GroupItem('Saved configs', 'configs', this.configs.length)];
     }
     if (e instanceof GroupItem) {
       return e.kind === 'tunnels' ? this.tunnels.map(t => new TunnelItem(t)) : this.configs.map(c => new ConfigItem(c));
@@ -178,27 +207,33 @@ async function logs(item?: TunnelItem): Promise<void> {
   if (pick) { openTerminal(`vibe-tunnel logs ${t.jobId}`, ['logs', t.jobId, '-f']); }
 }
 
-async function launchConfig(item?: ConfigItem): Promise<void> {
+async function launchConfig(item?: ConfigItem, kind?: Kind): Promise<void> {
   let name = item?.config.name;
   if (!name) {
     const list = await cluster.configs();
     const pick = await vscode.window.showQuickPick(list.map(c => ({ label: c.name, description: c.workspace, name: c.name })), { placeHolder: 'Config to launch' });
     name = pick?.name; if (!name) { return; }
   }
-  await launchByName(name);
+  await launchByName(name, kind);
 }
 
-/** Launch a saved config; asks for a resource profile when the config has none (e.g. claude-launch configs). */
-async function launchByName(name: string): Promise<void> {
+/**
+ * Launch a saved config; asks for a resource profile when the config has none (e.g. claude-launch configs).
+ * With a kind, that kind is forced; without, the config's own mode decides (container unless saved as node).
+ */
+async function launchByName(name: string, kind?: Kind): Promise<void> {
   // A config describes a sandbox. Launching from the sidebar means a VS Code tunnel:
   // into the container by default, or on the bare node if the config was saved in
   // node mode (the CLI decides from the config's MODE). Claude/shell are separate actions.
   const detail = await cluster.configShow(name);
+  // --container is only needed to override a config saved as node; leaving it out otherwise
+  // keeps container launches working against cluster installs that predate node mode.
+  const force = kind === 'node' ? ['--no-container'] : (kind === 'tunnel' && detail.mode === 'node') ? ['--container'] : [];
   if (!detail.profile) {
     const p = await pickProfile(''); if (!p) { return; }
-    await submitAndWait([p, '--config', name]);
+    await submitAndWait([p, '--config', name, ...force]);
   } else {
-    await submitAndWait(['--config', name]);
+    await submitAndWait(['--config', name, ...force]);
   }
 }
 
@@ -261,7 +296,7 @@ async function editConfig(item?: ConfigItem): Promise<void> {
   await wizard(detail, item.config.name);
 }
 
-async function newTunnel(): Promise<void> {
+async function newTunnel(kind: Kind): Promise<void> {
   const configs = await cluster.configs();
   type P = vscode.QuickPickItem & { action: 'scratch' | 'launch' | 'adjust'; name?: string };
   const items: P[] = [{ label: '$(add) From scratch', description: 'choose workspace, resources, …', action: 'scratch' }];
@@ -269,13 +304,14 @@ async function newTunnel(): Promise<void> {
     items.push({ label: `$(play) ${c.name}`, description: `${shorten(c.workspace)}${c.profile ? ' · ' + c.profile : ''}`, detail: 'launch as saved', action: 'launch', name: c.name });
     items.push({ label: `$(edit) ${c.name}`, description: 'adjust first', action: 'adjust', name: c.name });
   }
-  const pick = await vscode.window.showQuickPick(items, { placeHolder: 'Start a new tunnel from…', matchOnDescription: true });
+  const pick = await vscode.window.showQuickPick(items, { title: `New ${KIND[kind].name}: ${KIND[kind].blurb}`, placeHolder: `Start the ${KIND[kind].name} from…`, matchOnDescription: true });
   if (!pick) { return; }
-  if (pick.action === 'launch') { await launchByName(pick.name!); return; }
+  if (pick.action === 'launch') { await launchByName(pick.name!, kind); return; }
   const base: ConfigDetail = pick.action === 'adjust' ? await cluster.configShow(pick.name!) : {
     name: '', file: '', source: '', workspace: '', mode: 'tunnel', home: '', profile: '', label: '',
     time: '', cpus: '', mem: '', gpus: '', partition: '', account: '', rw: [], ro: [],
   };
+  base.mode = kind;      // the button chosen decides the kind, whatever the config was last used for
   await wizard(base, pick.action === 'adjust' ? pick.name : undefined);
 }
 
@@ -292,7 +328,7 @@ async function wizard(d: ConfigDetail, savedName?: string): Promise<void> {
       { label: '$(folder) Workspace', description: state.workspace || '(current directory on the cluster)', step: 'workspace' },
       { label: '$(home) Sandbox home', description: state.home || '(default: ~/.vibe-tunnel/home)', step: 'home' },
       { label: '$(list-tree) Extra directories', description: `${state.rw.length} read-write, ${state.ro.length} read-only`, step: 'binds' },
-      { label: '$(symbol-event) Mode', description: state.mode, step: 'mode' },
+      { label: '$(symbol-event) Kind', description: state.mode === 'tunnel' ? 'container tunnel (sandboxed)' : state.mode === 'node' ? 'node tunnel (no container)' : `${state.mode} in a terminal`, step: 'mode' },
     ];
     const jobMode = state.mode === 'tunnel' || state.mode === 'node';   // these submit a slurm job
     if (jobMode) {
@@ -305,7 +341,8 @@ async function wizard(d: ConfigDetail, savedName?: string): Promise<void> {
     else { items.push({ label: '$(terminal) Run in a terminal now', step: 'launch' }); }
     items.push({ label: '$(save) Save as config' + (savedName ? ` (${savedName})` : '…'), step: 'save' });
     if (jobMode) { items.push({ label: '$(save-all) Save and launch', step: 'savelaunch' }); }
-    const pick = await vscode.window.showQuickPick(items, { placeHolder: savedName ? `Config ${savedName}` : 'New tunnel — pick what to change, then Launch', ignoreFocusOut: true });
+    const what = state.mode === 'node' ? 'node tunnel (no container)' : state.mode === 'tunnel' ? 'container tunnel' : state.mode;
+    const pick = await vscode.window.showQuickPick(items, { title: savedName ? `Config ${savedName} · ${what}` : `New ${what}`, placeHolder: 'Pick what to change, then Launch', ignoreFocusOut: true });
     if (!pick) { return; }
     switch (pick.step) {
       case 'workspace': { const p = await browseDir(state.workspace || '~', 'Workspace: the project directory (VS Code opens here)'); if (p) { state.workspace = p; } break; }
@@ -316,8 +353,8 @@ async function wizard(d: ConfigDetail, savedName?: string): Promise<void> {
       case 'binds': await editBinds(state); break;
       case 'mode': {
         const m = await vscode.window.showQuickPick([
-          { label: 'tunnel', description: 'slurm job with a VS Code tunnel into the container' },
-          { label: 'node', description: 'slurm job with VS Code on the node itself, no container; sandbox later: vibe-tunnel claude in a terminal' },
+          { label: 'tunnel', description: 'container tunnel: slurm job, VS Code inside the sandbox container' },
+          { label: 'node', description: 'node tunnel: slurm job, VS Code on the node itself, no container; sandbox later via vibe-tunnel claude' },
           { label: 'claude', description: 'Claude Code in the container, in a terminal (interactive slurm job)' },
           { label: 'shell', description: 'a shell in the container, in a terminal (interactive slurm job)' }], { placeHolder: 'Mode' });
         if (m) { state.mode = m.label; } break;

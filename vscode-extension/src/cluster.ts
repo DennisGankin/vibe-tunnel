@@ -10,8 +10,10 @@ export interface RunResult { code: number; stdout: string; stderr: string; }
 export interface Tunnel {
   jobId: string; jobName: string; state: string; node: string; elapsed: string; left: string;
   tunnel: string; link: string; workspace: string;
+  /** 'tunnel' = inside the container, 'node' = on the bare node, '' = unknown (older cluster install) */
+  mode: string;
 }
-export interface ConfigSummary { name: string; workspace: string; home: string; profile: string; label: string; source: string; }
+export interface ConfigSummary { name: string; workspace: string; home: string; profile: string; label: string; source: string; mode: string; }
 export interface Profile { name: string; path: string; summary: string; }
 export interface ConfigDetail {
   name: string; file: string; source: string; workspace: string; mode: string; home: string; profile: string; label: string;
@@ -98,14 +100,19 @@ export class Cluster {
 
   // --- subcommands ------------------------------------------------------------
   async status(): Promise<Tunnel[]> {
-    const out = await this.runOk(['status', '--porcelain']);
-    return parsePorcelain(out, 9).map(f => ({
-      jobId: f[0], jobName: f[1], state: f[2], node: f[3], elapsed: f[4], left: f[5], tunnel: f[6], link: f[7], workspace: f[8],
+    // --porcelain=2 adds the mode as a 10th field. A cluster install that predates it
+    // answers with its human-readable table instead; then ask for the old format.
+    let rows = parsePorcelain(await this.runOk(['status', '--porcelain=2']), 10);
+    if (rows.some(f => !/^[0-9]+(_[0-9]+)?$/.test(f[0]))) {
+      rows = parsePorcelain(await this.runOk(['status', '--porcelain']), 10);
+    }
+    return rows.map(f => ({
+      jobId: f[0], jobName: f[1], state: f[2], node: f[3], elapsed: f[4], left: f[5], tunnel: f[6], link: f[7], workspace: f[8], mode: f[9],
     }));
   }
   async configs(): Promise<ConfigSummary[]> {
     const out = await this.runOk(['configs', '--porcelain']);
-    return parsePorcelain(out, 6).map(f => ({ name: f[0], workspace: f[1], home: f[2], profile: f[3], label: f[4], source: f[5] }));
+    return parsePorcelain(out, 7).map(f => ({ name: f[0], workspace: f[1], home: f[2], profile: f[3], label: f[4], source: f[5], mode: f[6] }));
   }
   async profiles(): Promise<Profile[]> {
     const out = await this.runOk(['profiles', '--porcelain']);

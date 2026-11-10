@@ -24,12 +24,22 @@ Works on macOS, Linux and Windows (Windows ships OpenSSH; no WSL needed for the 
 
 ## Use
 
-The **vibe-tunnel** view in the activity bar lists your **running tunnels** (click to connect, or stop / log
-from the inline buttons) and your **saved configs** (click to launch; edit, delete, or run Claude / a shell in
-that sandbox from the context menu). **New tunnel…** starts from a saved config or from scratch and walks
-through workspace (with a remote directory browser), sandbox home, extra read-only / read-write directories,
-mode, resources (profile plus per-field overrides) and label, then saves and/or launches. Mode *node* starts VS
-Code on the compute node itself, without the container; run `vibe-tunnel claude` in a terminal there for the sandbox.
+The **vibe-tunnel** view in the activity bar has two start rows at the top (also as buttons in the view's title bar):
+
+- **New container tunnel…** (shield): VS Code runs inside the sandbox container. Terminals and the Claude Code
+  extension only see the directories you bind. This is the default kind.
+- **New node tunnel…** (server): VS Code runs on the compute node itself, with your cluster home and extensions and
+  no container. Nothing is sandboxed until you run `vibe-tunnel claude` in a terminal of that window, which starts
+  the container with the sandbox you chose.
+
+Either one starts from a saved config (as saved, or adjusted first) or from scratch, and walks through workspace
+(with a remote directory browser), sandbox home, extra read-only / read-write directories, resources (profile plus
+per-field overrides) and label, then saves and/or launches.
+
+Below that, **Running tunnels** shows each tunnel's kind (shield + "container", or server + "node · no sandbox");
+click to connect, or stop / show the log from the inline buttons. **Saved configs** launch with a click, as the
+kind they were saved as (configs saved as node tunnels are marked "node"); the context menu has *Launch as
+container tunnel*, *Launch as node tunnel*, edit, delete, and Claude / a shell in that sandbox in a terminal.
 
 While a job starts, a progress notification follows it; if the VS Code tunnel needs its one-time GitHub login,
 the code is copied to your clipboard and a button opens GitHub. When the tunnel is up, a new VS Code window
