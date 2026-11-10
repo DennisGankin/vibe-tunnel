@@ -17,7 +17,7 @@ export interface ConfigDetail {
   name: string; file: string; source: string; workspace: string; mode: string; home: string; profile: string; label: string;
   time: string; cpus: string; mem: string; gpus: string; partition: string; account: string; rw: string[]; ro: string[];
 }
-export interface SubmitResult { job_id: string; job_name: string; tunnel_name: string; log: string; profile: string; config: string; resources?: string; }
+export interface SubmitResult { job_id: string; job_name: string; tunnel_name: string; log: string; profile: string; config: string; resources?: string; mode?: string; }
 
 export class SshError extends Error {
   constructor(message: string, public readonly code: number, public readonly stderr: string) { super(message); }
@@ -149,6 +149,8 @@ export class Cluster {
 export function configArgs(d: Omit<ConfigDetail, 'name' | 'file' | 'source'>, forSubmit = false): string[] {
   const a: string[] = [];
   if (!forSubmit) { a.push('--mode', d.mode || 'tunnel'); }
+  // node mode: VS Code directly on the compute node, no container
+  if (forSubmit && d.mode === 'node') { a.push('--no-container'); }
   if (d.profile) { a.push(forSubmit ? d.profile : '--profile', ...(forSubmit ? [] : [d.profile])); }
   if (d.workspace) { a.push('--workspace', d.workspace); }
   if (d.home) { a.push('--home', d.home); }

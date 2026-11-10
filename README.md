@@ -61,6 +61,7 @@ The VS Code CLI is not baked into the image: it is a static binary that gets bin
 - **Stable tunnel names.** A config's tunnel is named after the config unless you set a label, so VS Code's recent list and `vibe-tunnel open NAME` keep working across jobs.
 - **Several tunnels at once**, each with its own label, node and resources. Reopen a running one instead of resubmitting.
 - **Resources are editable in the menu.** Profiles (`profiles/*.sbatch`) are presets; the *Resources* entry shows time, CPUs, memory per CPU, GPUs, partition and account, lets you change any of them, and saves the values with the config. Memory always takes a unit (`2G`); the inputs refuse a bare number because slurm would read it as megabytes. Overrides are passed to `sbatch` as flags and beat the profile's `#SBATCH` lines. `vibe-tunnel profiles edit|new NAME` edits or creates a preset (your copies live in `~/.vibe-tunnel/profiles/` and shadow the repo's).
+- **Container or bare node.** By default VS Code attaches into the sandbox container. With `--no-container` (node mode) it runs on the compute node itself and you start the container from a terminal when you want Claude sandboxed.
 - **One command, both places.** `vibe-tunnel` is bash: on the cluster it is the CLI, on the laptop (no slurm) it drives the cluster copy over ssh. No Python, no environment.
 
 ## Quick start (own installation, other groups)
@@ -120,12 +121,34 @@ vibe-tunnel stop myproj
 Configs saved earlier with `claude-launch` are picked up as well (read-only, shown as "from claude-launch").
 Then on the laptop: `code --folder-uri 'vscode-remote://tunnel+myproj/<cluster path of the workspace>'` (printed by `wait`) or open the vscode.dev link.
 
+### VS Code on the node first, the container later (node mode)
+
+If you want an ordinary VS Code session on a compute node, with your normal cluster home, extensions and
+environment, and only put Claude into the sandbox when you need it:
+
+```bash
+vibe-tunnel submit --config myproj --no-container     # or: menu -> "VS Code on the node"
+```
+The job runs `code tunnel` directly on the node; resources, label, reconnect and stop work as for any tunnel.
+Then, in a terminal of that VS Code window:
+
+```bash
+vibe-tunnel claude          # the container with the sandbox (workspace, home, ro/rw dirs) chosen at launch
+vibe-tunnel shell           # or just a shell in it
+vibe-tunnel claude --config other     # or any other sandbox; several can run side by side
+```
+What to keep in mind: in node mode **only what you start with `vibe-tunnel claude|shell` is sandboxed**. The VS
+Code window itself, its terminals, and a Claude Code extension installed there run on the node with your full
+cluster permissions. That is why the extension is not preinstalled in node mode (`--extensions` adds it if you
+want it anyway). A config saved in node mode stays a node tunnel when launched; `--container` overrides.
+
 Without VS Code, on a compute node (e.g. after `srun ... --pty bash`):
 ```bash
 vibe-tunnel claude --config myproj --srun   # Claude Code in the same sandbox, inside an interactive slurm job
 vibe-tunnel shell --workspace ~/proj        # just a shell in the container, right here (login node: quick checks only)
+vibe-tunnel shell                           # no options: the current directory is the workspace
 ```
-The menu offers these as *mode* too (tunnel / claude / shell).
+The menu's home screen offers all four: tunnel into the container, VS Code on the node, Claude in this terminal, shell.
 
 ## Inside the container
 
@@ -170,7 +193,7 @@ The same thing as a sidebar inside VS Code: running tunnels (click to connect, s
 setup with a remote directory browser. Install the `.vsix` from [vscode-extension/](vscode-extension/):
 
 ```bash
-code --install-extension vscode-extension/vibe-tunnel-0.1.5.vsix
+code --install-extension vscode-extension/vibe-tunnel-0.1.6.vsix
 ```
 If you use VS Code **profiles**, install it into the profile you work in: `code --profile <name> --install-extension …`,
 or *Extensions → ··· → Install from VSIX…* inside that profile. Extensions are per profile.
@@ -216,7 +239,9 @@ bin/vibe-tunnel-launch    the interactive menu behind `vibe-tunnel launch` (adap
 bin/vibe-tunnel-client    laptop side: runs the remote menu over ssh, waits, opens VS Code (plain bash + ssh)
 bin/vibe-tunnel-lib       shared: site settings, config validation, sandbox resolution, container arguments
 bin/vibe-tunnel-job       host side of a run: resolves the sandbox, starts the container (tunnel / claude / shell)
+                          or, in node mode, the tunnel on the node itself
 bin/vibe-tunnel-entry     inside the container: home bootstrap, then `code tunnel`, claude, or a shell
+bin/vibe-tunnel-codetunnel  runs `code tunnel` (login token, extensions, unregister); used in the container and in node mode
 bin/vibe-tunnel-shellrc   sourced by every shell in the container (claude on PATH, self-update, claude function)
 images/vibe-tunnel.def    container recipe; the built .sif is gitignored
 profiles/*.sbatch         resource presets: #SBATCH lines + exec bin/vibe-tunnel-job (values editable in the menu)

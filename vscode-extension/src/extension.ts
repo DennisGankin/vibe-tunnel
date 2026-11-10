@@ -190,8 +190,9 @@ async function launchConfig(item?: ConfigItem): Promise<void> {
 
 /** Launch a saved config; asks for a resource profile when the config has none (e.g. claude-launch configs). */
 async function launchByName(name: string): Promise<void> {
-  // A config describes a sandbox; MODE is only what it was last used for. Launching
-  // from the sidebar always means a VS Code tunnel; Claude/shell are separate actions.
+  // A config describes a sandbox. Launching from the sidebar means a VS Code tunnel:
+  // into the container by default, or on the bare node if the config was saved in
+  // node mode (the CLI decides from the config's MODE). Claude/shell are separate actions.
   const detail = await cluster.configShow(name);
   if (!detail.profile) {
     const p = await pickProfile(''); if (!p) { return; }
@@ -203,7 +204,10 @@ async function launchByName(name: string): Promise<void> {
 
 async function submitAndWait(submitArgs: string[]): Promise<void> {
   const res = await cluster.submit(submitArgs);
-  output.appendLine(`submitted job ${res.job_id} (${res.job_name})${res.resources ? ' — ' + res.resources : ''}`);
+  output.appendLine(`submitted job ${res.job_id} (${res.job_name})${res.resources ? ' — ' + res.resources : ''}${res.mode === 'node' ? ' — node mode, no container' : ''}`);
+  if (res.mode === 'node') {
+    void vscode.window.showInformationMessage('Node tunnel: VS Code will run directly on the compute node, nothing is sandboxed. For Claude in the sandbox, run `vibe-tunnel claude` in a terminal of that window.');
+  }
   tree.refresh();
   await waitAndOpen(res.job_id, res.tunnel_name || res.job_name);
 }
@@ -290,15 +294,17 @@ async function wizard(d: ConfigDetail, savedName?: string): Promise<void> {
       { label: '$(list-tree) Extra directories', description: `${state.rw.length} read-write, ${state.ro.length} read-only`, step: 'binds' },
       { label: '$(symbol-event) Mode', description: state.mode, step: 'mode' },
     ];
-    if (state.mode === 'tunnel') {
+    const jobMode = state.mode === 'tunnel' || state.mode === 'node';   // these submit a slurm job
+    if (jobMode) {
       items.push({ label: '$(server) Resources', description: `${state.profile || '(no profile)'}  ${resources}${overrides ? '  |  ' + overrides : ''}`, step: 'resources' });
       items.push({ label: '$(tag) Tunnel label', description: state.label || (savedName ? `(default: ${savedName})` : '(default: vibe-<jobid>)'), step: 'label' });
     }
     items.push({ label: '', kind: vscode.QuickPickItemKind.Separator, step: '' });
     if (state.mode === 'tunnel') { items.push({ label: '$(play) Launch now', step: 'launch' }); }
+    else if (state.mode === 'node') { items.push({ label: '$(play) Launch now', description: 'VS Code on the node, no container', step: 'launch' }); }
     else { items.push({ label: '$(terminal) Run in a terminal now', step: 'launch' }); }
     items.push({ label: '$(save) Save as config' + (savedName ? ` (${savedName})` : '…'), step: 'save' });
-    if (state.mode === 'tunnel') { items.push({ label: '$(save-all) Save and launch', step: 'savelaunch' }); }
+    if (jobMode) { items.push({ label: '$(save-all) Save and launch', step: 'savelaunch' }); }
     const pick = await vscode.window.showQuickPick(items, { placeHolder: savedName ? `Config ${savedName}` : 'New tunnel — pick what to change, then Launch', ignoreFocusOut: true });
     if (!pick) { return; }
     switch (pick.step) {
@@ -311,6 +317,7 @@ async function wizard(d: ConfigDetail, savedName?: string): Promise<void> {
       case 'mode': {
         const m = await vscode.window.showQuickPick([
           { label: 'tunnel', description: 'slurm job with a VS Code tunnel into the container' },
+          { label: 'node', description: 'slurm job with VS Code on the node itself, no container; sandbox later: vibe-tunnel claude in a terminal' },
           { label: 'claude', description: 'Claude Code in the container, in a terminal (interactive slurm job)' },
           { label: 'shell', description: 'a shell in the container, in a terminal (interactive slurm job)' }], { placeHolder: 'Mode' });
         if (m) { state.mode = m.label; } break;
@@ -331,7 +338,7 @@ async function wizard(d: ConfigDetail, savedName?: string): Promise<void> {
         await submitAndWait(['--config', name]); return;
       }
       case 'launch': {
-        if (state.mode !== 'tunnel') {
+        if (state.mode !== 'tunnel' && state.mode !== 'node') {
           openTerminal(`vibe-tunnel ${state.mode}`, [state.mode, ...configArgs(state, true), '--srun']); return;
         }
         if (!state.profile) { const p = await pickProfile(''); if (!p) { break; } state.profile = p; }

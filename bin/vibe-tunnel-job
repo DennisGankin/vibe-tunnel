@@ -3,13 +3,16 @@ set -euo pipefail
 
 # vibe-tunnel-job -------------------------------------------------------------
 # Host side of a run: resolves the sandbox (workspace, persistent home, extra
-# binds) from a saved config and/or the run's env file, assembles the container
-# invocation (bin/vibe-tunnel-lib) and starts bin/vibe-tunnel-entry inside it.
+# binds) from a saved config and/or the run's env file, then starts the run.
 #
 # Modes (VT_MODE):
-#   tunnel  inside a slurm job: run `code tunnel` in the container; everything
-#           printed lands in the slurm log (~/.vibe-tunnel/logs/<jobid>.log),
+#   tunnel  inside a slurm job: `code tunnel` in the container (bin/vibe-tunnel-entry);
+#           everything printed lands in the slurm log (~/.vibe-tunnel/logs/<jobid>.log),
 #           which `vibe-tunnel wait` polls for the VS Code tunnel link
+#   node    inside a slurm job: `code tunnel` directly on the node, no container.
+#           VS Code then works with your cluster home like a plain tunnel; the
+#           sandbox is started from one of its terminals with `vibe-tunnel claude`,
+#           which defaults to this job's sandbox settings (VT_NODE_ENV_FILE)
 #   claude  interactive, right here: Claude Code in the container, then a shell
 #   shell   interactive, right here: a shell in the container
 #
@@ -27,7 +30,7 @@ VIBE_TUNNEL_DIR=${VIBE_TUNNEL_DIR:-$HOME/vibe-tunnel}
 # shellcheck disable=SC1091
 . "$VIBE_TUNNEL_DIR/bin/vibe-tunnel-lib"
 VT_MODE=${VT_MODE:-tunnel}
-case "$VT_MODE" in tunnel|claude|shell) ;; *) die "unknown mode: $VT_MODE" ;; esac
+case "$VT_MODE" in tunnel|node|claude|shell) ;; *) die "unknown mode: $VT_MODE" ;; esac
 
 # --- 1. per-run settings ----------------------------------------------------
 VT_TUNNEL_NAME= VT_CONFIG= VT_CONFIG_FILE= VT_WORKSPACE= VT_HOME= VT_EXTENSIONS=
@@ -44,26 +47,35 @@ TUNNEL_NAME=${VT_TUNNEL_NAME:-vibe-${SLURM_JOB_ID:-$$}}
 EXTENSIONS=${VT_EXTENSIONS-anthropic.claude-code}
 
 # --- 2. sanity checks -------------------------------------------------------
-[ -e "$VT_IMAGE" ]  || die "container image missing: $VT_IMAGE (run setup.sh to build it)"
-[ -f "$VT_ENTRY" ]  || die "entry script missing: $VT_ENTRY"
 [ -d "$WORKSPACE" ] || die "workspace is not a directory: $WORKSPACE"
-[ "$VT_MODE" != tunnel ] || [ -x "$VT_CODE_CLI" ] || die "VS Code CLI missing: $VT_CODE_CLI (run setup.sh)"
-mkdir -p "$CLAUDE_MOBILE_HOME"
+if [ "$VT_MODE" != node ]; then
+    [ -e "$VT_IMAGE" ]  || die "container image missing: $VT_IMAGE (run setup.sh to build it)"
+    [ -f "$VT_ENTRY" ]  || die "entry script missing: $VT_ENTRY"
+    mkdir -p "$CLAUDE_MOBILE_HOME"
+fi
+case "$VT_MODE" in tunnel|node) [ -x "$VT_CODE_CLI" ] || die "VS Code CLI missing: $VT_CODE_CLI (run setup.sh)" ;; esac
 
 # Euler: outbound HTTPS (tunnel relay, server download, Anthropic API) needs the proxy.
 if command -v module >/dev/null 2>&1; then
     module load eth_proxy 2>/dev/null || log "module eth_proxy not available; continuing with current proxy env"
 fi
-SINGULARITY=$(vt_singularity)
-[ -n "$SINGULARITY" ] || die "neither singularity nor apptainer found on this node"
+SINGULARITY=
+if [ "$VT_MODE" != node ]; then
+    SINGULARITY=$(vt_singularity)
+    [ -n "$SINGULARITY" ] || die "neither singularity nor apptainer found on this node"
+fi
 
-# /tmp inside the container: a per-run directory on local scratch (--writable-tmpfs is tiny).
-VT_TMPDIR=${TMPDIR:-/tmp}/vibe-tunnel.${SLURM_JOB_ID:-$$}
+# Scratch for this run on local scratch: /tmp inside the container (--writable-tmpfs
+# is tiny), or the CLI's working dir in node mode. Unique per run, so several
+# containers started in one job (vibe-tunnel claude in two terminals) never share
+# or delete each other's.
+VT_TMPDIR=${TMPDIR:-/tmp}/vibe-tunnel.${SLURM_JOB_ID:-local}.$$
 mkdir -p "$VT_TMPDIR"
 trap 'rm -rf "$VT_TMPDIR" 2>/dev/null || true' EXIT
 
 # --- 3. container invocation -------------------------------------------------
-vt_container_args
+vt_vscode_auth_dir
+[ "$VT_MODE" = node ] || vt_container_args
 
 # First run with the per-user VS Code login store: seed it from a login saved
 # per sandbox home by earlier versions (this home, the default home, or any
@@ -89,38 +101,67 @@ vt_container_env "VT_MODE=$VT_MODE" "VT_TUNNEL_NAME=$TUNNEL_NAME" "VT_JOB_ID=${S
 banner() {
     echo "================ vibe-tunnel ($VT_MODE) ================"
     echo "node       : $(hostname -s)${SLURM_JOB_ID:+  job $SLURM_JOB_ID}"
-    echo "image      : $VT_IMAGE"
-    echo "workspace  : $WORKSPACE  (same path in the container; also /workspace)"
-    echo "home       : $CLAUDE_MOBILE_HOME  -> /home"
-    echo "tmp        : $VT_TMPDIR  -> /tmp"
+    if [ "$VT_MODE" = node ]; then
+        echo "workspace  : $WORKSPACE"
+        echo "container  : none. VS Code runs directly on the node with your cluster home."
+        echo "             Sandbox from a terminal there:  vibe-tunnel claude   (or: vibe-tunnel shell)"
+    else
+        echo "image      : $VT_IMAGE"
+        echo "workspace  : $WORKSPACE  (same path in the container; also /workspace)"
+        echo "home       : $CLAUDE_MOBILE_HOME  -> /home"
+        echo "tmp        : $VT_TMPDIR  -> /tmp"
+    fi
     if [ -n "${SLURM_JOB_ID:-}" ]; then
         local tl; tl=$(squeue -h -j "$SLURM_JOB_ID" -o %l 2>/dev/null | head -n1 | awk '{print $1}' || true)
         echo "allocated  : ${SLURM_CPUS_PER_TASK:-?} cpus · ${SLURM_MEM_PER_CPU:-?} MB per cpu${SLURM_MEM_PER_NODE:+ (${SLURM_MEM_PER_NODE} MB total)} · gpus ${SLURM_JOB_GPUS:-${SLURM_GPUS:-none}} · time limit ${tl:-?} · partition ${SLURM_JOB_PARTITION:-?}"
     fi
+    [ "$VT_MODE" = node ] && return 0
     for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do echo "bind (rw)  : $b"; done
     for b in "${RO_BINDS[@]+"${RO_BINDS[@]}"}"; do echo "bind (ro)  : $b"; done
 }
 
 # --- 4. run -----------------------------------------------------------------
-if [ "$VT_MODE" != tunnel ]; then
+case "$VT_MODE" in claude|shell)
     banner >&2
     echo "=================================================" >&2
-    exec "$SINGULARITY" exec "${CONTAINER_ARGS[@]}" "$VT_IMAGE" bash /opt/vibe-tunnel/entry "$@"
-fi
+    # not exec: the EXIT trap has to remove this run's scratch dir afterwards
+    status=0
+    "$SINGULARITY" exec "${CONTAINER_ARGS[@]}" "$VT_IMAGE" bash /opt/vibe-tunnel/entry "$@" || status=$?
+    exit "$status" ;;
+esac
 
 banner
 echo "code cli   : $VT_CODE_CLI"
 echo "tunnel     : $TUNNEL_NAME"
 echo "VT_TUNNEL_NAME=$TUNNEL_NAME"
 echo "VT_WORKSPACE=$WORKSPACE"
+echo "VT_MODE=$VT_MODE"
 echo "================================================="
 
-# Forward SIGTERM (slurm time limit, scancel) into the container so the entry
-# script can unregister the tunnel before the job dies.
+if [ "$VT_MODE" = node ]; then
+    what="node tunnel"
+    # Terminals of this tunnel inherit the environment: keep vibe-tunnel on PATH
+    # and remember this job's sandbox settings, so a bare `vibe-tunnel claude`
+    # there starts the container with the workspace/home/binds chosen at launch.
+    export PATH="$VIBE_TUNNEL_DIR/bin:$PATH"
+    export VT_NODE_ENV_FILE=${VT_ENV_FILE:-}
+    # No --server-data-dir: the CLI's default (~/.vscode-server in your cluster
+    # home), i.e. the extensions and settings of an ordinary tunnel on the node.
+    RUN=(env "CT_CODE_SRC=$VT_CODE_CLI" "CT_WORK=$VT_TMPDIR" "CT_CLI_ROOT=$VT_STATE_DIR/vscode-cli"
+         "CT_TOKEN_STORE=$VT_VSCODE_AUTH" "CT_NAME=$TUNNEL_NAME" "CT_WORKSPACE=$WORKSPACE"
+         "CT_EXTENSIONS=$EXTENSIONS" "CT_JOB_ID=${SLURM_JOB_ID:-local}" "CT_NODE=$(hostname -s)"
+         bash "$VT_CODETUNNEL")
+else
+    what="container"
+    RUN=("$SINGULARITY" exec "${CONTAINER_ARGS[@]}" "$VT_IMAGE" bash /opt/vibe-tunnel/entry)
+fi
+
+# Forward SIGTERM (slurm time limit, scancel) to the tunnel (into the container)
+# so it can unregister before the job dies.
 child=
 forward() { [ -n "$child" ] && kill -TERM "$child" 2>/dev/null || true; }
 trap forward TERM INT
-"$SINGULARITY" exec "${CONTAINER_ARGS[@]}" "$VT_IMAGE" bash /opt/vibe-tunnel/entry &
+"${RUN[@]}" &
 child=$!
 # A trapped signal makes `wait` return early (>128) while the child is still
 # shutting down, so keep waiting until it has really exited.
@@ -130,11 +171,11 @@ while :; do
     status=$?
     kill -0 "$child" 2>/dev/null || break
 done
-log "container exited with status $status"
+log "$what exited with status $status"
 if [ "$status" -ne 0 ] && [ -n "${SLURM_JOB_ID:-}" ]; then
     # Make the failure readable without an sacct round trip.
     case "$status" in
-        135|137) log "status $status means the container was killed (SIGBUS/SIGKILL): almost always out of memory. Allocated: ${SLURM_MEM_PER_CPU:-?} MB per cpu x ${SLURM_CPUS_PER_TASK:-?} cpus. The first launch into a fresh sandbox home needs ~1 GB for the Claude install; raise 'Memory per CPU' (with a unit, e.g. 2G) in Resources." ;;
+        135|137) log "status $status means the $what was killed (SIGBUS/SIGKILL): almost always out of memory. Allocated: ${SLURM_MEM_PER_CPU:-?} MB per cpu x ${SLURM_CPUS_PER_TASK:-?} cpus. The first launch into a fresh sandbox home needs ~1 GB for the Claude install; raise 'Memory per CPU' (with a unit, e.g. 2G) in Resources." ;;
     esac
     sacct -j "$SLURM_JOB_ID" -P -o JobID,State,ExitCode,MaxRSS,ReqMem,Elapsed 2>/dev/null | sed 's/^/sacct: /' || true
 fi

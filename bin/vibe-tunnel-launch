@@ -101,7 +101,7 @@ load_running() {
     while IFS='|' read -r id name state node el left tunnel link; do
         [ -n "$id" ] || continue
         RUN_IDS+=("$id"); RUN_TUNNELS+=("$tunnel")
-        RUN_LABELS+=("$(printf '%-12s %-9s %-10s left %-9s job %s' "${tunnel:-(starting)}" "$state" "${node:--}" "$left" "$id")")
+        RUN_LABELS+=("$(printf '%-12s %-9s %-10s left %-9s job %s%s' "${tunnel:-(starting)}" "$state" "${node:--}" "$left" "$id" "$(grep -qs '^VT_MODE=node' "$VT_LOG_DIR/$id.log" && printf '  (node, no container)')")")
     done < <("$VT" status --porcelain 2>/dev/null || true)
 }
 print_running() {
@@ -309,13 +309,17 @@ print_binds() {
     return 0
 }
 
+# tunnel and node submit a slurm job (profile, resources, label apply);
+# claude and shell run right here.
+is_job_mode() { [ "$MODE" = tunnel ] || [ "$MODE" = node ]; }
+
 profile_line() {
-    if [ "$MODE" != tunnel ]; then printf '%s(not used: runs here, no slurm job)%s' "$DIM" "$RST"; return; fi
+    if ! is_job_mode; then printf '%s(not used: runs here, no slurm job)%s' "$DIM" "$RST"; return; fi
     if [ -n "$PROFILE" ]; then printf '%s%s%s  %s%s%s' "$MAG" "$PROFILE" "$RST" "$DIM" "$(profile_summary "$PROFILE")" "$RST"
     else printf '%s(none chosen)%s' "$RED" "$RST"; fi
 }
 label_line() {
-    if [ "$MODE" != tunnel ]; then printf '%s(not used)%s' "$DIM" "$RST"; return; fi
+    if ! is_job_mode; then printf '%s(not used)%s' "$DIM" "$RST"; return; fi
     if [ -n "$LABEL" ]; then printf '%s%s%s  %s→ tunnel+%s, reused across jobs%s' "$GREEN" "$LABEL" "$RST" "$DIM" "$LABEL" "$RST"
     else printf '%s(none: vibe-<jobid>)%s' "$DIM" "$RST"; fi
 }
@@ -323,6 +327,7 @@ label_line() {
 mode_hint() {
     case "$MODE" in
         tunnel) printf 'slurm job + VS Code tunnel into the container' ;;
+        node)   printf 'slurm job + VS Code on the node itself, no container (sandbox later: vibe-tunnel claude)' ;;
         claude) printf 'Claude Code in the container, in this terminal' ;;
         shell)  printf 'a shell in the container, in this terminal' ;;
     esac
@@ -369,10 +374,12 @@ render_header() {
     printf '  %sMode%s       %s%s%s  %s%s%s%s\n' "$BOLD" "$RST" "$GREEN" "$MODE" "$RST" "$DIM" "$(mode_hint)" "$RST" "$EL"
     printf '%s\n' "$EL"
     printf '  %sWorkspace%s  %s%s%s%s\n' "$BOLD" "$RST" "$YELLOW" "$(tilde "$WORKSPACE")" "$RST" "$EL"
-    printf '             %s↳ same path in the container: VS Code opens here, Claude can read & edit%s%s\n' "$DIM" "$RST" "$EL"
+    if [ "$MODE" = node ]; then printf '             %s↳ VS Code opens here, on the node itself (your normal cluster files)%s%s\n' "$DIM" "$RST" "$EL"
+    else printf '             %s↳ same path in the container: VS Code opens here, Claude can read & edit%s%s\n' "$DIM" "$RST" "$EL"; fi
     printf '%s\n' "$EL"
     printf '  %sHome%s       %s%s%s%s\n' "$BOLD" "$RST" "$CYAN" "$(tilde "$CLAUDE_MOBILE_HOME")" "$RST" "$EL"
-    printf '             %s↳ persistent /home: Claude + VS Code logins, extensions, shell config%s%s\n' "$DIM" "$RST" "$EL"
+    if [ "$MODE" = node ]; then printf '             %s↳ /home of the container you start later with vibe-tunnel claude (Claude login)%s%s\n' "$DIM" "$RST" "$EL"
+    else printf '             %s↳ persistent /home: Claude + VS Code logins, extensions, shell config%s%s\n' "$DIM" "$RST" "$EL"; fi
     printf '%s\n' "$EL"
     printf '  %sResources%s  %s%s\n' "$BOLD" "$RST" "$(profile_line)" "$EL"
     printf '  %sLabel%s      %s%s\n' "$BOLD" "$RST" "$(label_line)" "$EL"
@@ -387,13 +394,14 @@ render_header() {
 # --- actions -----------------------------------------------------------------
 build_submit_args() {
     local b
-    [ "$MODE" != tunnel ] || printf '%s\n' "$PROFILE"
+    ! is_job_mode || printf '%s\n' "$PROFILE"
+    [ "$MODE" != node ] || printf '%s\n' "--no-container"
     printf '%s\n%s\n' "--workspace" "$WORKSPACE"
     [ -z "$CLAUDE_MOBILE_HOME" ] || printf '%s\n%s\n' "--home" "$CLAUDE_MOBILE_HOME"
     for b in "${RW_BINDS[@]+"${RW_BINDS[@]}"}"; do printf '%s\n%s\n' "--rw" "$b"; done
     for b in "${RO_BINDS[@]+"${RO_BINDS[@]}"}"; do printf '%s\n%s\n' "--ro" "$b"; done
-    [ "$MODE" != tunnel ] || [ -z "$LABEL" ] || printf '%s\n%s\n' "--name" "$LABEL"
-    if [ "$MODE" = tunnel ]; then
+    ! is_job_mode || [ -z "$LABEL" ] || printf '%s\n%s\n' "--name" "$LABEL"
+    if is_job_mode; then
         [ -z "$R_TIME" ]      || printf '%s\n%s\n' "--time" "$R_TIME"
         [ -z "$R_CPUS" ]      || printf '%s\n%s\n' "--cpus" "$R_CPUS"
         [ -z "$R_MEM" ]       || printf '%s\n%s\n' "--mem" "$R_MEM"
@@ -406,10 +414,14 @@ build_submit_args() {
 review_command() {
     render_header
     printf '  %sWould run:%s%s\n' "$BOLD" "$RST" "$EL"
-    if [ "$MODE" = tunnel ]; then printf '    %svibe-tunnel submit%s' "$CYAN" "$RST"; else printf '    %svibe-tunnel %s%s' "$CYAN" "$MODE" "$RST"; fi
+    if is_job_mode; then printf '    %svibe-tunnel submit%s' "$CYAN" "$RST"; else printf '    %svibe-tunnel %s%s' "$CYAN" "$MODE" "$RST"; fi
     while IFS= read -r a; do printf ' %q' "$a"; done < <(build_submit_args)
     printf '%s\n%s\n' "$EL" "$EL"
-    printf '  %sThe job then starts the container with these mounts and runs `code tunnel` inside it.%s%s\n' "$DIM" "$RST" "$EL"
+    case "$MODE" in
+        tunnel) printf '  %sThe job then starts the container with these mounts and runs `code tunnel` inside it.%s%s\n' "$DIM" "$RST" "$EL" ;;
+        node)   printf '  %sThe job runs `code tunnel` on the node itself. In a terminal there, `vibe-tunnel claude` starts%s%s\n' "$DIM" "$RST" "$EL"
+                printf '  %sthe container with the home and directories above; without it nothing is sandboxed.%s%s\n' "$DIM" "$RST" "$EL" ;;
+    esac
     clr_down
     pause
 }
@@ -503,15 +515,17 @@ change_profile() {
 }
 
 change_mode() {
-    case "$MODE" in tunnel) MENU_DEFAULT=0 ;; claude) MENU_DEFAULT=1 ;; shell) MENU_DEFAULT=2 ;; esac
+    case "$MODE" in tunnel) MENU_DEFAULT=0 ;; node) MENU_DEFAULT=1 ;; claude) MENU_DEFAULT=2 ;; shell) MENU_DEFAULT=3 ;; esac
     menu_select "Pick what to launch:" \
         "tunnel  — slurm job with a VS Code tunnel into the container (default)" \
+        "node    — slurm job with VS Code on the node itself, no container" \
         "claude  — Claude Code in the container, right here in this terminal" \
         "shell   — plain shell in the container, right here in this terminal"
     case "${MENU_CHOICE}" in
         0) MODE=tunnel ;;
-        1) MODE=claude ;;
-        2) MODE=shell ;;
+        1) MODE=node ;;
+        2) MODE=claude ;;
+        3) MODE=shell ;;
     esac
 }
 
@@ -547,7 +561,7 @@ load_config_file() {
     # shellcheck disable=SC1090
     . "$f"
     R_TIME=$TIME R_CPUS=$CPUS R_MEM=$MEM R_GPUS=$GPUS R_PARTITION=$PARTITION R_ACCOUNT=$ACCOUNT
-    case "$MODE" in tunnel|claude|shell) ;; *) MODE=tunnel ;; esac
+    case "$MODE" in tunnel|node|claude|shell) ;; *) MODE=tunnel ;; esac
     [ -n "$CLAUDE_MOBILE_HOME" ] || CLAUDE_MOBILE_HOME=$saved_home
     return 0
 }
@@ -582,7 +596,7 @@ save_config() {
     render_header
     printf '  %s✓ Saved config %s%s%s%s\n' "$GREEN" "$BOLD" "$name" "$RST" "$EL"
     printf '  %s%s%s%s\n' "$DIM" "$(config_path "$name")" "$RST" "$EL"
-    printf '  %sLater: vibe-tunnel submit --config %s   or pick it under "Reuse a saved config".%s%s\n' "$DIM" "$name" "$RST" "$EL"
+    printf '  %sLater: vibe-tunnel submit --config %s   or pick it when starting a new run.%s%s\n' "$DIM" "$name" "$RST" "$EL"
     clr_down
     pause
 }
@@ -653,7 +667,7 @@ reopen_running() {
 
 # --- launch --------------------------------------------------------------------
 launch() {
-    if [ "$MODE" != tunnel ]; then
+    if ! is_job_mode; then
         local args=()
         while IFS= read -r a; do args+=("$a"); done < <(build_submit_args)
         cls; show_cursor; trap - EXIT
@@ -728,8 +742,12 @@ screen_setup() {
     local items actions
     while true; do
         items=() actions=()
-        items+=("Sandbox        workspace, home, extra directories ▸");                             actions+=(sandbox)
-        if [ "$MODE" = tunnel ]; then
+        if [ "$MODE" = node ]; then
+            items+=("Sandbox        for the container you start later: home, extra directories ▸"); actions+=(sandbox)
+        else
+            items+=("Sandbox        workspace, home, extra directories ▸");                         actions+=(sandbox)
+        fi
+        if is_job_mode; then
             items+=("Resources      $(profile_summary "$PROFILE") ▸");                              actions+=(resources)
             items+=("Tunnel label   ${LABEL:-(none: vibe-<jobid>)}");                              actions+=(label)
         fi
@@ -738,12 +756,13 @@ screen_setup() {
         items+=("Review the command");                                                              actions+=(review)
         case "$MODE" in
             tunnel) items+=("Launch ▶   submit the job and wait for the tunnel") ;;
+            node)   items+=("Launch ▶   submit the job; VS Code opens on the node, no container") ;;
             claude) items+=("Launch ▶   start Claude Code in the container here") ;;
             shell)  items+=("Launch ▶   open a shell in the container here") ;;
         esac
         actions+=(launch)
         items+=("Back");                                                                            actions+=(back)
-        menu_select "New $MODE — set it up, then Launch:" "${items[@]}"
+        menu_select "New $(mode_title) — set it up, then Launch:" "${items[@]}"
         if [ "${MENU_CHOICE}" -ge 0 ] 2>/dev/null && [ "${MENU_CHOICE}" -lt ${#actions[@]} ]; then action=${actions[$MENU_CHOICE]}; else action=back; fi
         case "$action" in
             sandbox)   screen_sandbox ;;
@@ -758,13 +777,17 @@ screen_setup() {
     done
 }
 
+mode_title() {
+    case "$MODE" in tunnel) printf 'tunnel' ;; node) printf 'node tunnel (no container)' ;; *) printf '%s' "$MODE" ;; esac
+}
+
 # Start a new run: choose the starting point (saved config or scratch), then set it up.
 screen_start() {
     MODE=$1
     HEADER_MODE=home
     list_configs
     if [ ${#CONFIG_NAMES[@]} -gt 0 ]; then
-        if ! pick_config "Start from scratch (current directory, defaults)" "Start the $MODE from:"; then
+        if ! pick_config "Start from scratch (current directory, defaults)" "Start the $(mode_title) from:"; then
             # "from scratch" is the last entry; a real cancel (q) returns MENU_CHOICE=-2
             [ "${MENU_CHOICE}" -eq -2 ] && return
             WORKSPACE=$(pwd); CLAUDE_MOBILE_HOME=$VT_DEFAULT_HOME; RW_BINDS=(); RO_BINDS=(); LABEL=; LOADED_CONFIG=
@@ -785,6 +808,7 @@ screen_home() {
         items=() actions=()
         if [ ${#RUN_IDS[@]} -gt 0 ]; then items+=("Reconnect to a running tunnel ▶"); actions+=(reopen); fi
         items+=("New VS Code tunnel              slurm job, VS Code attaches into the container");   actions+=(tunnel)
+        items+=("VS Code on the node             slurm job, no container; sandbox later from a terminal"); actions+=(node)
         items+=("Claude Code in this terminal    same sandbox, no VS Code");                         actions+=(claude)
         items+=("Shell in the container");                                                           actions+=(shell)
         items+=("Quit");                                                                             actions+=(quit)
@@ -794,7 +818,7 @@ screen_home() {
         else action=none; fi
         case "$action" in
             reopen) reopen_running ;;
-            tunnel|claude|shell) screen_start "$action" ;;
+            tunnel|node|claude|shell) screen_start "$action" ;;
             quit)   cls; printf '%s  Bye.%s\n' "$DIM" "$RST"; exit 0 ;;
             *) : ;;
         esac
